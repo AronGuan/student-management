@@ -1,0 +1,16 @@
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS ai_decisions;
+DROP TABLE IF EXISTS follow_ups;
+DROP TABLE IF EXISTS trials;
+DROP TABLE IF EXISTS credit_ledger;
+DROP TABLE IF EXISTS credit_packages;
+DROP TABLE IF EXISTS leave_requests;
+DROP TABLE IF EXISTS attendances;
+DROP TABLE IF EXISTS lessons;
+DROP TABLE IF EXISTS class_enrollments;
+DROP TABLE IF EXISTS classes;
+DROP TABLE IF EXISTS guardians;
+DROP TABLE IF EXISTS students;
+DROP TABLE IF EXISTS subjects;
+DROP TABLE IF EXISTS teacher_profiles;
+DROP TABLE IF EXISTS users;

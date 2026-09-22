@@ -1,0 +1,28 @@
+# 凭据 —— 必须先于第一次 commit 生效
+.env
+.env.local
+.env.*.local
+
+# 本地工作台记忆（含连接串与踩坑记录，含敏感信息）
+.workbuddy/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# 本地临时输出（agent 的工具 stdout 落盘目录，只用于回读）
+.tmp/
+
+# Go
+backend/tmp/
+*.exe
+*.dll
+*.so
+*.test
+backend/bin/
+
+# 日志与本地文件
+*.log
+.DS_Store
+Thumbs.db

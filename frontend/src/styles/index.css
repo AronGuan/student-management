@@ -1,0 +1,143 @@
+@import 'tailwindcss';
+@import './tokens.css';
+
+/* ── Tailwind v4 CSS-first theme ────────────────────────────────────────────
+   `inline` 让工具类直接输出 var(--token)，而不是再复制一份值。
+   组件层只写 bg-surface / text-muted / border-strong，永远不写裸 hex。      */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-surface-warm: var(--surface-warm);
+
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-muted: var(--muted);
+  --color-meta: var(--meta);
+
+  --color-border: var(--border);
+  --color-border-soft: var(--border-soft);
+  --color-border-strong: var(--border-strong);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-active: var(--accent-active);
+  --color-accent-bg: var(--accent-bg);
+  --color-accent-on: var(--accent-on);
+
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-warn: var(--warn);
+  --color-warn-bg: var(--warn-bg);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --color-neutral-fg: var(--neutral-fg);
+  --color-neutral-bg: var(--neutral-bg);
+
+  --color-row-hover: var(--row-hover);
+  --color-credit-track: var(--credit-track);
+  --color-sla-track: var(--sla-track);
+
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
+  --font-mono: var(--font-mono);
+
+  --text-th: 11px;
+  --text-th--line-height: 16px;
+  --text-meta: 12px;
+  --text-meta--line-height: 16px;
+  --text-row: 13.5px;
+  --text-row--line-height: 20px;
+  --text-body: 14px;
+  --text-body--line-height: 22px;
+  --text-section: 13px;
+  --text-section--line-height: 18px;
+  --text-page: 20px;
+  --text-page--line-height: 28px;
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-full: var(--radius-full);
+
+  --shadow-popover: var(--shadow-popover);
+
+  --ease-standard: var(--ease-standard);
+}
+
+@layer base {
+  html {
+    background-color: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-body);
+    font-size: var(--text-body);
+    line-height: var(--leading-body);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+  }
+
+  :focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+    border-radius: var(--radius-sm);
+  }
+
+  ::placeholder {
+    color: var(--meta);
+    opacity: 1;
+  }
+}
+
+@utility num {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+@utility page-title {
+  font-size: var(--text-page);
+  line-height: var(--leading-page);
+  font-weight: 590;
+  letter-spacing: -0.01em;
+}
+
+@utility section-title {
+  font-size: var(--text-section);
+  line-height: var(--leading-section);
+  font-weight: 590;
+}
+
+@utility col-header {
+  font-size: var(--text-th);
+  line-height: var(--leading-th);
+  font-weight: 510;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* 表格行高由密度档位驱动（URL query ?density=compact|default|comfortable） */
+@utility row-h {
+  height: var(--row-h, var(--row-h-default));
+}
+
+/* SLA 进度条（48h 窗口，24h 处有一道刻度线） */
+@utility sla-bar {
+  position: relative;
+  height: 4px;
+  width: 72px;
+  border-radius: var(--radius-full);
+  background-color: var(--sla-track);
+  overflow: hidden;
+}
+
+@utility sla-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--border-strong);
+}

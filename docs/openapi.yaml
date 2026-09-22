@@ -1,0 +1,1913 @@
+openapi: 3.0.3
+info:
+  title: Austin Education Student Management API
+  version: 1.0.0
+  description: |
+    预付费履约系统 API。课时 = 家长已付的钱 + 库存 + 排期承诺。
+    所有时间均为 Australia/Melbourne 墙上时钟（ISO 8601 本地时间字符串，如 "2026-09-21T09:00:00+10:00"），服务端不做时区转换。
+    认证：浏览器走 httpOnly Cookie `ae_token`；curl / Postman 走 `Authorization: Bearer <token>`。
+
+    ## 两条全局契约不变量（客户端必须依赖，服务端必须保证）
+
+    1. **空集合恒为 `[]`，绝不返回 `null`**。所有列表端点（`/classes`、`/classes/{id}/enrollments`、
+       `/lessons`、`/follow-ups`、`/students`、`/students/{id}/credits`、`/leave-requests`）在无匹配时
+       返回 `data: []`（分页端点返回 `data.items: []`），**不返回 `null`**。客户端 `.map()` 不得因空集合崩溃
+       （`/students/{id}/credits` 曾返回 `items:null`，新学生页面直接崩）。
+
+    2. **参数解析失败的处理，按参数角色分档（不是一刀切）**。此前非法值一律被静默忽略，
+       导致过滤条件失效、整个结果集被返回；`GET /students?owner_admin_id=abc` 甚至返回过
+       `code: -1`（与兜底 500 撞码，客户端无法区分）。
+
+       | 参数角色 | 例子 | 非法值的行为 | 理由 |
+       |---|---|---|---|
+       | **过滤 / 作用域** | `owner_admin_id` `teacher_id` `weekday` `class_id` `student_id` `lesson_id` | **400 / code=40000** | 被忽略会返回调用者没要的数据 —— **正确性问题**，且可能构成越权读 |
+       | **分页** | `limit` `page` | 回落默认值（20 / 1），不报错 | 只决定"取多少"，范围与作用域仍正确，且 `limit=abc` 报错对用户无价值 |
+       | **排序** | `sort` | 回落 `updated_at DESC`，不报错 | 只决定顺序，取到的仍然是他要的数据，只是顺序非预期 —— **表现问题** |
+
+       判据一句话：**参数被忽略后，返回的数据是否是调用者本来要看的那批？** 是 → 回落；
+       不是 → 400。故 `sort` / `limit` 不适用 400，`owner_admin_id` 一类必须 400。
+       细节见 ADR-010「契约不变量」与 ADR-011。
+
+    ## 错误码
+
+    | code | HTTP | 含义 |
+    |---|---|---|
+    | 0 | 200 | 成功 |
+    | **40000** | **400** | **调用方输入错误，改请求即可成功**：数字型 query 无法解析（message 形如 `"weekday 必须是数字"`）、必填字段缺失（如 `"full_name 为必填"`）、日期格式非法（如 `"from_date 必须是 YYYY-MM-DD 格式"`）、枚举值非法（如 `"outcome 只能是 converted 或 lost"`） |
+    | 40100 | 401 | 未登录 / token 失效 |
+    | 40300 | 403 | 角色不允许 |
+    | 40301 | 403 | R7：不是该学生的 owner；或 household 读别家孩子 |
+    | 40400 | 404 | 资源不存在 |
+    | 40901 | 409 | R3a：学生周时段重叠 |
+    | 40902 | 409 | R3b：老师时段冲突 |
+    | 40903 | 409 | R3c：班级已满 |
+    | 40904 | 409 | R6：余额为 0，不能排课 |
+    | 40905 | 409 | R1：该学生该科目已试听过 |
+    | 40906 | 409 | 重复结算（幂等命中） |
+    | **40907** | **409** | **学生不在该课次所属班级的在册名单中（`POST /leave-requests`）** |
+    | **40908** | **409** | **请求本身合法，但当前业务状态不允许**：课次已取消（结算 / 请假）、课次已开始（请假）—— 调用方**改请求也无法成功**，故与 40000 分开 |
+    | 42201 | 422 | R4：出勤状态非法（老师只能 present / absent） |
+    | 42202 | 422 | R8：LLM 输出未通过白名单校验 |
+    | 50000 | 500 | 未分类服务端错误（**兜底，不再使用 `-1`**） |
+
+    LLM 不可用**不是错误**：HTTP 200 + `ai_status: unavailable`（见 ADR-006）。
+
+    ## 角色权限矩阵（依据 router.go:52-112 的 RequireRoles，已逐条核对）
+
+    越权访问返回 `403 / code=40300`（角色不允许）；staff 访问非自己学生返回 `403 / code=40301`（R7）。
+    **注意 household 在多数端点上是 403 而不是"只看到自己"** —— 下表已区分这两种处理。
+
+    | 端点 | admin | teacher | student (household) | 说明 |
+    |---|---|---|---|---|
+    | `POST /auth/login` `POST /auth/logout` `GET /auth/me` `GET /config` | 是 | 是 | 是 | 登录态 |
+    | `GET /students` | 是 | 是 | **403** | household 不走列表，走 `/dashboard/household` |
+    | `POST /students` `PATCH /students/{id}` `POST /students/{id}/transfer-owner` | 是 | **403** | **403** | 写路径仅 admin（R7） |
+    | `GET /students/{id}` `GET /students/{id}/credits` `GET /students/{id}/ai-cards` | 是 | 是 | 是（**仅自己孩子**，越界 40301） | 数据范围内收敛 |
+    | `POST /students/{id}/credit-packages` `POST /students/{id}/credit-adjustments` | 是 | **403** | **403** | 动钱的路径仅 admin |
+    | `GET /trials` | 是 | 是 | **403** | — |
+    | `POST /trials` `POST /trials/{id}/outcome` `GET /follow-ups` `POST /follow-ups/{id}/complete` | 是 | **403** | **403** | — |
+    | `GET /classes` `GET /classes/{id}/enrollments` | 是 | 是 | 是（**结果按自己孩子收敛**） | 无 RequireRoles |
+    | `POST /classes` `POST /classes/{id}/enrollments` `DELETE /classes/{id}/enrollments/{student_id}` | 是 | **403** | **403** | — |
+    | `GET /subjects` `GET /teachers` | 是 | **403** | **403** | 建班选项 |
+    | `GET /lessons` | 是 | 是 | 是（**按绑定学生在查询里收敛**） | 家长端要列课才能请假 |
+    | `POST /lessons/generate` | 是 | **403** | **403** | — |
+    | `POST /lessons/cancel-range` | 是 | 是（**限自己的课**） | **403** | R10 |
+    | `GET /lessons/{id}/roster` `POST /lessons/{id}/attendance` `PATCH /lessons/{id}/attendance/{student_id}` | 是 | 是 | **403** | 出勤仅课堂两侧 |
+    | `GET /leave-requests` | 是 | 是 | 是（**按自己孩子收敛**） | — |
+    | `POST /leave-requests` | 是 | **403** | 是 | 请假由学生端发起（R4） |
+    | `POST /ai/trial-conversion/{student_id}` `POST /ai/renewal-risk/{student_id}` | 是 | **403** | **403** | — |
+    | `GET /dashboard/admin` | 是 | **403** | **403** | — |
+    | `GET /dashboard/teacher` | 是 | 是 | **403** | admin 可代看以免老师请假时盲区 |
+    | `GET /dashboard/household` | **403** | **403** | 是 | — |
+
+    一句话原则：**写路径一律 admin（除请假与出勤）；读路径按"是不是他该看的"收敛；
+    household 无任何管理端入口，只看得到自己孩子的数据。**
+
+    ## 本文件的效力边界（必读）
+
+    本规格**已向运行时实现对齐**，而非实现向规格对齐。逐项裁定见
+    **`docs/decisions/ADR-011-contract-drift-reconciliation.md`**（含哪些端点以实现为准、
+    哪些以规格为准、以及为什么）。凡与本文冲突处，**ADR-011 优先**。
+
+    已知的意图与机制落差（诚实声明，避免误读本文件的效力）：
+    ADR-010 曾规定"前端用 `openapi-typescript` 生成类型、不手写 DTO"。**该生成链路在本次交付中
+    并未接上**（`frontend/package.json` 无 `gen:types`，`frontend/src/lib/types.ts` 为手写）。
+    因此本文件当前的角色是**人工维护的对照契约与评审依据**，不是机器强制的类型源。
+    接上生成步骤 + `openapi-diff` 的后续工作已登记在 `docs/decisions/OPEN-DECISIONS.md`。
+
+    ⚠️ 契约状态（Phase 3 收尾）：本文件与 Go 实现曾在十余处不一致。经 ADR-011 逐项裁定后，
+    其中可判定的部分**已在实现侧修正并逐条实测验证**（不是把规格改写成迁就代码）：
+    `/auth/me` 的 `{user, student_ids}` 形状、`/students` 的 `can_write` 与 `has_more` 拼写、
+    `owner_admin_id` 的 `me` 与非法值 400、`/leave-requests` 的按调用者收敛、
+    `/students/:id/ai-cards` 的注册、以及 `low_credit[].weeks_left` 恒空字段的删除。
+
+    诚实说明：本文件**仍不是**从代码生成的全量重写 —— 各端点的响应 schema 以
+    `backend/internal/handler` 的实际响应为准，逐项差异与裁定理由见
+    `docs/decisions/ADR-011-contract-drift-reconciliation.md` 的裁定表。
+    本文档中标注“以运行时为准”的参数（如 `/students` 的 `sort`）已按实现校正，
+    未实现的参数已删除而不是保留为“待确认”。
+servers:
+  - url: http://localhost:8080/api/v1
+    description: 本地开发（Vite dev server 通过 server.proxy 代理 /api 到此）
+  - url: https://{host}/api/v1
+    description: 生产（Nginx 反代）
+    variables:
+      host:
+        default: localhost
+
+tags:
+  - name: auth
+  - name: students
+  - name: credits
+  - name: trials
+  - name: followups
+  - name: classes
+  - name: lessons
+  - name: leave
+  - name: ai
+  - name: dashboard
+
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: 登录
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, example: "admin1" }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: "登录成功（同时 Set-Cookie: ae_token）"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          token: { type: string, description: "供 curl / Postman 使用的 Bearer token" }
+                          user: { $ref: '#/components/schemas/User' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: 登出（清除 Cookie）
+      responses:
+        '200': { $ref: '#/components/responses/OkEmpty' }
+
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: 当前登录者与其可见范围
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          user: { $ref: '#/components/schemas/User' }
+                          student_ids:
+                            type: array
+                            description: "role=student 时该家庭账号绑定的学生"
+                            items: { type: integer, format: int64 }
+
+  /config:
+    get:
+      tags: [auth]
+      summary: "业务阈值（R2 的 48h / R4 的 24h / R6 的余额阈值）的单一真源"
+      description: |
+        为什么需要这个端点：48 / 24 / 4 这三个阈值**都是假设值，没有外部基准**（见 OPEN-DECISIONS）。
+        如果前端再抄一份，规则一改 UI 文案就会撒谎 —— 于是把阈值做成服务端下发的配置，
+        前端只读不写（`MyCreditsPage.tsx:59`）。
+        环境变量：`FOLLOWUP_SLA_HOURS`（默认 48）、`LEAVE_NOTICE_HOURS`（默认 24）、
+        `LOW_CREDIT_THRESHOLD`（默认 4），见 `internal/config/config.go:11-18, 53-57`。
+        **注意**：改这些值会同时改变服务端判定与前端文案，因此这是一份"规则配置"而不是"展示配置"。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Thresholds' }
+
+  /students:
+    get:
+      tags: [students]
+      summary: 学生列表
+      description: |
+        可见范围：admin 读全量；teacher 读自己教的班的学生。
+        **household(role=student) 不能调用本端点 → `403 / 40300`**（router.go:62 的 RequireRoles 只含
+        admin 与 teacher）—— 家长端不走学生列表，走 `GET /dashboard/household`。
+        **空集合契约**：无匹配时 `data.items` 恒为 `[]`，**绝不返回 `null`**（客户端 `.map()` 不得因空集合崩溃）。
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/StudentStatus' }
+        - name: q
+          in: query
+          description: 姓名模糊匹配
+          schema: { type: string }
+        - name: low_credit
+          in: query
+          description: "true 时只返回余额 <= 4 的学生（R6）"
+          schema: { type: boolean }
+        - name: owner_admin_id
+          in: query
+          description: "接受字面量 `me`（等价于当前登录 admin）或数字 id；**其它任何值一律 400 / code=40000**"
+          schema: { type: string }
+        - name: sort
+          in: query
+          description: |
+            已按实现校正（service/student.go:125-131）。
+
+            **被识别的取值只有两个**：`name`（按 `full_name ASC`）、
+            `balance_asc`（按 `COALESCE(balance,0) ASC, full_name ASC`）。
+
+            **不传、或传任何其它值**都回落到默认排序：`updated_at DESC, id DESC`。
+            非识别值**不报 400**，静默回落 —— 这是刻意的，与 `owner_admin_id` 一类
+            过滤参数不同：排序被忽略时范围与分页仍然正确，只是顺序非预期；
+            而过滤参数被忽略会返回调用者没要的数据。前者是表现问题，后者是正确性问题，
+            所以只有后者报了 400。
+
+            因此这里**刻意不写 `enum`** —— `enum` 在 OpenAPI 中语义是「仅这些值合法」，
+            而服务端并不校验（`sort=bogus` 实测返回 200）。契约不声明服务端没有的强制力。
+            客户端若要约束，请自行在下拉框里只提供这两个值。
+          schema: { type: string }
+          example: balance_asc
+        # 说明：契约此前还声明过一个 `order` 参数，但实现中并不存在（排序方向由 sort 自身
+        # 决定），已删除。参数一旦写进契约就会被客户端当成可依赖的能力。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: '#/components/schemas/PageMeta'
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                default: []
+                                items: { $ref: '#/components/schemas/StudentListItem' }
+        '400':
+          description: "数字型 query 参数无法解析：code=40000，例如 \"owner_admin_id 必须是数字或 me\""
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+    post:
+      tags: [students]
+      summary: 建档（咨询登记）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateStudentRequest' }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Student' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /students/{id}:
+    parameters: [{ $ref: '#/components/parameters/PathId' }]
+    get:
+      tags: [students]
+      summary: 学生详情（档案 + 余额 + 在班 + 待跟进 + 最新 AI 卡）
+      description: |
+        读作用域：admin 读全量；teacher 读自己教的班的学生；**household(role=student) 只读自己的孩子，读别家孩子返回 403**（与 `/students/{id}/ai-cards` 一致）。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/StudentDetail' }
+        '403':
+          description: "code=40301：staff 非该学生 owner（R7），或 household 读别家孩子"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [students]
+      summary: "更新学生档案（R7：admin 只能改 owner_admin_id = 自己的学生）"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateStudentRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Student' }
+        '403':
+          description: "R7 违反：code=40301"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /students/{id}/transfer-owner:
+    parameters: [{ $ref: '#/components/parameters/PathId' }]
+    post:
+      tags: [students]
+      summary: 学生转给另一个 admin（追问：转归属）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to_admin_id]
+              properties:
+                to_admin_id: { type: integer, format: int64 }
+                reason: { type: string, maxLength: 255 }
+      responses:
+        '200': { $ref: '#/components/responses/OkStudent' }
+        '403':
+          description: "仅当前 owner 或 super_admin 可发起"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /students/{id}/credits:
+    parameters: [{ $ref: '#/components/parameters/PathId' }]
+    get:
+      tags: [credits]
+      summary: 余额与流水（只读）
+      description: |
+        读作用域：admin 读全量；teacher 读自己教的班的学生；**household 只读自己的孩子，读别家孩子返回 403**。
+        **空集合契约（最重要）**：新学生没有任何流水时 `data.items` 恒为 `[]`，**绝不返回 `null`** —— 客户端 `.map()` 不得崩溃。
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          balance: { type: integer, description: "SUM(credit_ledger.delta)；无流水时为 0" }
+                          items:
+                            type: array
+                            default: []
+                            items: { $ref: '#/components/schemas/LedgerEntry' }
+                          total: { type: integer, default: 0 }
+        '403':
+          description: "code=40301：staff 非该学生 owner（R7），或 household 读别家孩子"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /students/{id}/credit-packages:
+    parameters: [{ $ref: '#/components/parameters/PathId' }]
+    post:
+      tags: [credits]
+      summary: "成交开账：建课时包 + 写首条 ledger（reason=purchase）"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePackageRequest' }
+      responses:
+        '201':
+          description: 已开账
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          package: { $ref: '#/components/schemas/CreditPackage' }
+                          balance: { type: integer }
+        '403':
+          description: "R7 违反：code=40301"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /students/{id}/credit-adjustments:
+    parameters: [{ $ref: '#/components/parameters/PathId' }]
+    post:
+      tags: [credits]
+      summary: "退款 / 补偿（追问：课时怎么退）。只 append 流水，不修改历史"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason, note]
+              properties:
+                reason:
+                  type: string
+                  enum: [refund, manual_adjust]
+                  description: "refund=退未消耗课时（服务端把余额归零并置 package=refunded）；manual_adjust=退某一节已扣的课"
+                delta:
+                  type: integer
+                  description: "manual_adjust 时必填，通常为 +1；refund 时忽略（服务端自行计算）"
+                lesson_id:
+                  type: integer
+                  format: int64
+                  description: "manual_adjust 关联课次，可空"
+                note: { type: string, maxLength: 255 }
+      responses:
+        '201':
+          description: 已记账
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          entry: { $ref: '#/components/schemas/LedgerEntry' }
+                          balance: { type: integer }
+
+  /trials:
+    get:
+      tags: [trials]
+      summary: 试听列表
+      parameters:
+        - name: student_id
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: outcome
+          in: query
+          schema: { type: string, enum: [pending, converted, lost] }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Trial' }
+    post:
+      tags: [trials]
+      summary: "安排试听（R1：同学生同科目只能试听一次）"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTrialRequest' }
+      responses:
+        '201':
+          description: 已安排
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Trial' }
+        '409':
+          description: "R1 违反：code=40905"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /trials/{id}/outcome:
+    parameters: [{ $ref: '#/components/parameters/PathId' }]
+    post:
+      tags: [trials]
+      summary: "标记试听结果 → R2 自动生成 due_at = now + 48h 的跟进任务"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [outcome]
+              properties:
+                outcome: { type: string, enum: [converted, lost] }
+                note: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      # 以运行时为准：`handler/trial.go:83` 直接 `OK(c, fu)`，`data` 就是新建的
+                      # FollowUp 本身，**没有** `{ trial, follow_up }` 这层包装（旧草案写错了）。
+                      # 前端曾按草案的包装写法做过防御（`LeadsPage.tsx:126-131` 两种都吃），
+                      # 这里按实现校正，避免契约继续声明一个服务端从不返回的形状。
+                      data: { $ref: '#/components/schemas/FollowUp' }
+
+  /follow-ups:
+    get:
+      tags: [followups]
+      summary: 跟进任务列表
+      description: "**空集合契约**：无匹配时 `data` 恒为 `[]`，绝不返回 `null`。"
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, done, overdue] }
+        - name: owner_admin_id
+          in: query
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        default: []
+                        items: { $ref: '#/components/schemas/FollowUp' }
+
+  /follow-ups/{id}/complete:
+    parameters: [{ $ref: '#/components/parameters/PathId' }]
+    post:
+      tags: [followups]
+      summary: 完成跟进
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note: { type: string, maxLength: 500 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEmpty' }
+
+  /classes:
+    get:
+      tags: [classes]
+      summary: 班级列表
+      description: |
+        读作用域：admin / teacher 返回全部**启用中**的班级；**household(role=student) 只返回其孩子处于
+        `status='active'` 报名的班级**（收敛在 SQL 里，scheduling.go:49-58，不留给客户端过滤）。
+        只返回 `status='active'` 的班级（scheduling.go:33），归档班不出现在列表里。
+        排序固定为 `weekday, start_min`（即按周课表顺序）。
+        **空集合契约**：无匹配时 `data` 恒为 `[]`，绝不返回 `null`。
+      parameters:
+        - name: teacher_id
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: subject_id
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: weekday
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 6 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        default: []
+                        items: { $ref: '#/components/schemas/Class' }
+        '400':
+          description: "数字型 query 参数无法解析：code=40000，例如 \"weekday 必须是数字\""
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+    post:
+      tags: [classes]
+      summary: 建班（含老师时段冲突校验）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateClassRequest' }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Class' }
+        '409':
+          description: "code=40902 老师时段冲突"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  # 说明：首版规格在此声明过 `GET /classes/{id}`（班级详情，附 enrolled_count / seats_left），
+  # 但 router.go:80-84 并无该路由，前端也未调用（ClassesPage 只用 /classes 列表与
+  # /classes/:id/enrollments）。契约里留一个不存在的端点比不写更糟 —— 已删除；
+  # 人数与容量请从 `GET /classes` 的 `enrolled` 与 `capacity` 读取（剩余 = capacity - enrolled）。
+
+  /classes/{id}/enrollments:
+    parameters: [{ $ref: '#/components/parameters/PathId' }]
+    get:
+      tags: [classes]
+      summary: 班级名册
+      description: |
+        读作用域：admin / teacher 返回完整名册；**household(role=student) 只返回自己孩子在册的行**。
+        **空集合契约**：无匹配时 `data` 恒为 `[]`，绝不返回 `null`。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        default: []
+                        items: { $ref: '#/components/schemas/Enrollment' }
+    post:
+      tags: [classes]
+      summary: "排班（R3：周时段重叠 / 班级容量 / 余额>0；R6：余额=0 不许排课）"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [student_id]
+              properties:
+                student_id: { type: integer, format: int64 }
+      responses:
+        '201':
+          description: 已排班
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Enrollment' }
+        '409':
+          description: "code=40901 周时段重叠 / 40903 班级已满 / 40904 余额为 0"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+        '403':
+          description: "R7 违反：code=40301"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /classes/{id}/enrollments/{student_id}:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+      - name: student_id
+        in: path
+        required: true
+        schema: { type: integer, format: int64 }
+    delete:
+      tags: [classes]
+      summary: 退班（软删除：status=withdrawn）
+      responses:
+        '200': { $ref: '#/components/responses/OkEmpty' }
+
+  /subjects:
+    get:
+      tags: [classes]
+      summary: 科目选项（建班抽屉用）
+      description: |
+        供 `ClassesPage.CreateDrawer` 的科目下拉使用（`ClassesPage.CreateDrawer.tsx:41`）。
+        仅 admin 可调用（router.go:88）。返回全量、按名称升序，不分页。
+        响应形态是**裸数组**（`OK(c, rows)`，scheduling.go:93）：`data` 直接是数组，
+        不是 `{items: [...]}`。`[]` 表示尚无科目，不会是 null。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        default: []
+                        items: { $ref: '#/components/schemas/SubjectOption' }
+        '403':
+          description: "code=40300：非 admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /teachers:
+    get:
+      tags: [classes]
+      summary: 老师选项（建班抽屉用）
+      description: |
+        供建班时选老师（`ClassesPage.CreateDrawer.tsx:42`）。仅 admin 可调用（router.go:89）。
+        **只返回 `status='active'` 的老师**（scheduling.go:102-104）—— 停用账号不能再被排新课，
+        因此不应出现在选择器里。响应形态是**裸数组**（`data` 直接是数组）。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        default: []
+                        items: { $ref: '#/components/schemas/TeacherOption' }
+        '403':
+          description: "code=40300：非 admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /lessons:
+    get:
+      tags: [lessons]
+      summary: 课次列表
+      description: "**空集合契约**：无匹配时 `data` 恒为 `[]`，绝不返回 `null`。"
+      parameters:
+        - name: date
+          in: query
+          schema: { type: string, format: date }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+        - name: teacher_id
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: class_id
+          in: query
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        default: []
+                        items: { $ref: '#/components/schemas/Lesson' }
+        '400':
+          description: "数字型 query 参数无法解析：code=40000，例如 \"teacher_id 必须是数字\""
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /lessons/generate:
+    post:
+      tags: [lessons]
+      summary: 按班级周计划批量生成课次
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from_date, to_date]
+              properties:
+                from_date: { type: string, format: date }
+                to_date: { type: string, format: date }
+                class_ids:
+                  type: array
+                  items: { type: integer, format: int64 }
+                  description: 省略则生成全部 active 班级
+      responses:
+        '201':
+          description: 已生成
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          created: { type: integer }
+
+  /lessons/cancel-range:
+    post:
+      tags: [lessons]
+      summary: "老师请假：批量取消某老师一段时间的课（追问：老师请假一周）。不生成 attendance、不扣课时"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [teacher_id, from_date, to_date, reason]
+              properties:
+                teacher_id: { type: integer, format: int64 }
+                from_date: { type: string, format: date }
+                to_date: { type: string, format: date }
+                reason: { type: string, maxLength: 255 }
+      responses:
+        '200':
+          description: 已取消
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          cancelled: { type: integer }
+                          skipped_completed: { type: integer, description: "已完成的课不可取消，计入此项" }
+        '403':
+          description: "仅 admin 或该老师本人"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /lessons/{id}/roster:
+    parameters: [{ $ref: '#/components/parameters/PathId' }]
+    get:
+      tags: [lessons]
+      summary: "老师视角名单：学生 + 系统预填出勤状态 + 是否新生"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Roster' }
+
+  /lessons/{id}/attendance:
+    parameters: [{ $ref: '#/components/parameters/PathId' }]
+    post:
+      tags: [lessons]
+      summary: "批量结算出勤并扣课时（R4 + R5）。幂等：同一学生同一课次只产生一条 consume 流水"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [records]
+              properties:
+                records:
+                  type: array
+                  items: { $ref: '#/components/schemas/AttendanceRecordInput' }
+      responses:
+        '200':
+          description: 已结算
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          deducted: { type: integer, description: "本次实际扣减的课时总数" }
+                          items:
+                            type: array
+                            items: { $ref: '#/components/schemas/Attendance' }
+        '409':
+          description: "code=40906 重复结算（幂等命中）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+        '422':
+          description: "code=42201 出勤状态非法（老师只能覆盖为 present/absent）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /lessons/{id}/attendance/{student_id}:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+      - name: student_id
+        in: path
+        required: true
+        schema: { type: integer, format: int64 }
+    patch:
+      tags: [lessons]
+      summary: "老师覆盖单条出勤（只能 present / absent，覆盖写 ledger 留痕）"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [present, absent] }
+                note: { type: string, maxLength: 255 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Attendance' }
+        '422':
+          description: "code=42201"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /leave-requests:
+    get:
+      tags: [leave]
+      summary: 请假列表
+      description: "**空集合契约**：无匹配时 `data` 恒为 `[]`，绝不返回 `null`。"
+      parameters:
+        - name: student_id
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: lesson_id
+          in: query
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        default: []
+                        items: { $ref: '#/components/schemas/LeaveRequest' }
+        '400':
+          description: "数字型 query 参数无法解析：code=40000，例如 \"student_id 必须是数字\""
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+    post:
+      tags: [leave]
+      summary: "学生端发起请假。服务端按 (lesson.start - now) >= 24h 判 leave_approved（不扣）或 leave_late（照扣）"
+      description: |
+        服务端强制校验（R3 家族）：调用者必须是该 lesson 所属班级中 `status='active'` 报名记录对应的学生
+        （household 只能对本家孩子的在册课次请假）。**不满足则 409 / code=40907。**
+        这条校验是必需的：此前只校验学生归属，任何调用者都能对任意 lesson_id 请假，
+        晚于 24h 的路径会真的扣 1 个课时——是数据完整性问题，不只是越权。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lesson_id]
+              properties:
+                lesson_id: { type: integer, format: int64 }
+                reason: { type: string, maxLength: 255 }
+      responses:
+        '201':
+          description: 已提交
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/LeaveRequest' }
+        '409':
+          description: "code=40907：该学生未报名这节课所属的班级"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  /ai/trial-conversion/{student_id}:
+    parameters: [{ $ref: '#/components/parameters/PathIdStudent' }]
+    post:
+      tags: [ai]
+      summary: "试听转化决策卡（R8：枚举白名单校验 + 失败降级 unavailable）"
+      responses:
+        '200':
+          description: "HTTP 200 恒返回；LLM 不可用时 data.ai_status = unavailable 并附规则兜底结论"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AiDecisionCard' }
+
+  /ai/renewal-risk/{student_id}:
+    parameters: [{ $ref: '#/components/parameters/PathIdStudent' }]
+    post:
+      tags: [ai]
+      summary: 续费 / 流失决策卡
+      responses:
+        '200':
+          description: "HTTP 200 恒返回"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AiDecisionCard' }
+
+  /students/{id}/ai-cards:
+    parameters: [{ $ref: '#/components/parameters/PathId' }]
+    get:
+      tags: [ai]
+      summary: 历史决策卡（含 ai_status）
+      description: |
+        路径参数是 **student id**，不是 card id —— 卡片按学生归属（handler/ai.go:22）。
+        读作用域与 `/students/{id}` 完全相同（`AssertReadable`，ai.go:70）：staff 可读任意
+        学生，household 只读自己的孩子，读别家孩子的卡片返回 403。
+        响应形态是 `data: {items: [...]}` —— **不是裸数组**，与 `OK(c, gin.H{"items": ...})`
+        （ai.go:79）一致。`items` 恒为数组，无卡片时是 `[]` 而不是 null。
+      parameters:
+        - name: kind
+          in: query
+          description: 按卡片类型过滤；不传则返回全部类型
+          schema: { type: string, enum: [trial_conversion, renewal_risk] }
+        - name: limit
+          in: query
+          description: 返回条数上限，默认 50；非数字时按默认值处理（此端点不做 400，见 ai.go:74 的 atoiOr）
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: |
+            OK。注意：模型调用失败**不是**错误响应 —— 仍返回 200，
+            由 `ai_status` 标明状态，卡片内容来自规则兜底引擎（ADR-006）。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          items:
+                            type: array
+                            default: []
+                            items: { $ref: '#/components/schemas/AiDecisionCard' }
+        '403':
+          description: "code=40301：household 读别家孩子的卡片（与 /students/{id} 同作用域）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /dashboard/admin:
+    get:
+      tags: [dashboard]
+      summary: "admin 首屏：三条行动队列 + 头部计数（不是学生列表）"
+      description: |
+        设计意图（见 `handler/dashboard.go:61-63`）：admin 的失效模式是**忘了动手**，不是找不到人。
+        所以首屏是"现在该做什么"的行动队列，而不是一张需要自己拼凑的学生表。
+        作用域：全部按 `s.owner_admin_id = 当前 admin` 收敛，只含自己的学生。
+        `overdue_hours` / `due_at` 由 SQL **按服务端时钟**算出：服务端只下发逾期**小时数**，
+        措辞（「2 天」/「6 小时」）由前端负责。前端**不得**自行由时间戳重新推导 SLA 数值，
+        否则会在另一个时区渲染出错误的逾期时长。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AdminDashboard' }
+
+  /dashboard/teacher:
+    get:
+      tags: [dashboard]
+      summary: "老师首屏：今日课表 + 待补点名（富行，不点进去就能回答三个问题）"
+      description: |
+        设计意图（见 `handler/dashboard.go:148-149`）：老师不打任何东西就能回答
+        「下一节是什么 / 谁是新面孔 / 谁请假了」。因此每行自带 `students` / `new_faces` /
+        `on_leave` / `recorded` 四个计数，而不是让前端为每节课再发一次请求（N+1）。
+        `start_clock` 由服务端从 `start_min` 格式化，前端不重复实现分钟到时钟的换算。
+        `missing_roll_call`：过去日期里仍未点名的课次数 —— 这是老师端最容易积压的一类遗漏。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/TeacherDashboard' }
+
+  /dashboard/household:
+    get:
+      tags: [dashboard]
+      summary: "家长/学生首屏：本家庭凭证名下的孩子及各自余额"
+      description: |
+        设计意图（见 `handler/dashboard.go:181-183`）：家长端存在的唯一理由是回答
+        「我的课时怎么没了」。所以首屏第一屏就给出每个孩子的当前余额与在读状态，
+        再由此进入逐条流水的 `/students/{id}/credits`。
+        作用域：仅 `students.user_id = 当前登录用户`，一个家庭凭证可带多个孩子（兄弟姐妹）。
+        响应形态是 `data: {students: [...]}` —— **不是裸数组**，与
+        `OK(c, gin.H{"students": ...})`（dashboard.go:199）一致；`students` 恒为数组，
+        无绑定时为 `[]` 而非 null。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          students:
+                            type: array
+                            default: []
+                            items: { $ref: '#/components/schemas/HouseholdStudentRow' }
+        '403':
+          description: "code=40300：非 household 角色（仅 role=student 可访问）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: ae_token
+      description: httpOnly Cookie，SameSite=Lax，生产加 Secure
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "供 curl / Postman 绕过前端直接测试规则时使用"
+
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    PathIdStudent:
+      name: student_id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    Page:
+      name: page
+      in: query
+      description: 页码，从 1 开始
+      schema: { type: integer, minimum: 1, default: 1 }
+    Limit:
+      name: limit
+      in: query
+      description: |
+        每页条数。有效区间 **1..200**；**越界（0、负数、>200）或无法解析时回落 20**，不报错
+        （依据 `internal/service/student.go:85-87`；`page` 同理回落 1）。
+        回落到 20 而非 400：分页参数只决定"取多少"，不改变**作用域**，服务端仍返回正确可见范围内的数据，
+        故不适用 400 策略（见 ADR-010「契约不变量」的 400 适用边界）。
+      schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
+
+  responses:
+    OkEmpty:
+      description: OK
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiResponse' }
+    OkStudent:
+      description: OK
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/ApiResponse'
+              - type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Student' }
+    Unauthorized:
+      description: "code=40100"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiErrorBody' }
+    NotFound:
+      description: "code=40400"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiErrorBody' }
+    ValidationError:
+      description: 参数校验失败
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiErrorBody' }
+
+  schemas:
+    ApiResponse:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: integer
+          description: "0=成功；非 0 见错误码表"
+          example: 0
+        data: {}
+        message:
+          type: string
+          description: 错误时的人类可读描述
+
+    ApiErrorBody:
+      type: object
+      properties:
+        code: { $ref: '#/components/schemas/BusinessErrorCode' }
+        message: { type: string, example: "周时段重叠：该学生周一 09:00-10:30 已在「数学 A 班」" }
+        data:
+          type: object
+          nullable: true
+
+    BusinessErrorCode:
+      type: integer
+      description: "业务错误码。0=成功；LLM 不可用走 200 + ai_status=unavailable，不属于错误码范畴"
+      enum:
+        - 40000
+        - 40100
+        - 40300
+        - 40301
+        - 40400
+        - 40901
+        - 40902
+        - 40903
+        - 40904
+        - 40905
+        - 40906
+        - 40907
+        - 40908
+        - 42201
+        - 42202
+        - 50000
+      example: 40901
+
+    PageMeta:
+      type: object
+      description: |
+        分页信封。**字段名是 `has_more`（下划线），不是 `hasMore`。**
+        来源：`handler.Page` 的 json tag 为 `json:"has_more"`（respond.go:53）。
+        前端曾按 `hasMore` 读取，得到恒为 `undefined`（falsy 而非异常），
+        "下一页" 控件永久禁用且无任何报错 —— 静默失效正是拼写必须锁死的原因。
+      properties:
+        total: { type: integer }
+        page: { type: integer }
+        limit: { type: integer }
+        has_more:
+          type: boolean
+          description: 是否还有下一页。由 total / page / limit 计算，客户端不要自行推算
+
+    UserRole:
+      type: string
+      enum: [admin, teacher, student]
+
+    User:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        role: { $ref: '#/components/schemas/UserRole' }
+        username: { type: string }
+        display_name: { type: string }
+        status: { type: string, enum: [active, disabled] }
+
+    StudentStatus:
+      type: string
+      enum: [lead, trial, active, churned]
+
+    Guardian:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        phone: { type: string }
+        email: { type: string }
+        relationship: { type: string, example: "mother" }
+        is_primary: { type: boolean }
+
+    Student:
+      type: object
+      description: |
+        以 `model.Student`（model/model.go:51-68）的实际 json tag 为准。
+        `balance` 与 `can_write` 是**派生只读字段**（`gorm:"->;-:migration"`，见 R5 / R7），
+        不是表列，但**列表与详情都会返回**（它们挂在共享的 Student 结构上）。
+      properties:
+        id: { type: integer, format: int64 }
+        owner_admin_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: "归属顾问。Go 侧是 *uint64，学生可以不归属任何人，所以真的会是 null"
+        user_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: "家庭账号（家长与学生共用凭证）；一个账号可挂多个学生"
+        full_name: { type: string }
+        preferred_name: { type: string }
+        year_level:
+          type: string
+          description: |
+            **是字符串不是数字**（model/model.go:57 为 `string`），值为 "Year 9" / "Year 10"
+            这类标签。此前契约误写为 integer，会把 "Year 9" 判成类型错误。
+            空值是 `""`（无 omitempty）—— 消费侧用 `||` 兜底。
+        status: { $ref: '#/components/schemas/StudentStatus' }
+        source:
+          type: string
+          description: "获客来源。无 omitempty，未填时是 `\"\"` 而不是 null"
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        balance:
+          type: integer
+          description: "SUM(credit_ledger.delta)。派生，绝不存字段（R5）"
+        can_write:
+          type: boolean
+          description: |
+            调用者能否写这个学生 —— 由服务端算好（model.CanWrite，R7），
+            客户端**不要**自行按 role 推断，否则和 R7 的判定逻辑会分叉。
+            列表与详情都带此字段。
+
+    StudentListItem:
+      allOf:
+        - $ref: '#/components/schemas/Student'
+        - type: object
+          properties:
+            balance: { type: integer, description: "SUM(credit_ledger.delta)" }
+            owner_admin_name: { type: string }
+            active_class_count: { type: integer }
+            pending_followup: { type: boolean }
+
+    StudentDetail:
+      allOf:
+        - $ref: '#/components/schemas/Student'
+        - type: object
+          properties:
+            balance: { type: integer }
+            guardians:
+              type: array
+              items: { $ref: '#/components/schemas/Guardian' }
+            enrollments:
+              type: array
+              items: { $ref: '#/components/schemas/Enrollment' }
+            packages:
+              type: array
+              items: { $ref: '#/components/schemas/CreditPackage' }
+            follow_ups:
+              type: array
+              items: { $ref: '#/components/schemas/FollowUp' }
+            latest_ai_card:
+              allOf:
+                - $ref: '#/components/schemas/AiDecisionCard'
+              nullable: true
+
+    CreateStudentRequest:
+      type: object
+      required: [full_name]
+      properties:
+        full_name: { type: string, maxLength: 120 }
+        preferred_name: { type: string, maxLength: 60 }
+        year_level: { type: integer, minimum: 0, maximum: 12 }
+        source: { type: string, maxLength: 60 }
+        status: { $ref: '#/components/schemas/StudentStatus' }
+        guardians:
+          type: array
+          items: { $ref: '#/components/schemas/Guardian' }
+        create_family_account:
+          type: boolean
+          description: "true 时同时创建 role=student 的家庭账号并返回初始口令"
+
+    UpdateStudentRequest:
+      type: object
+      properties:
+        full_name: { type: string, maxLength: 120 }
+        preferred_name: { type: string, maxLength: 60 }
+        year_level: { type: integer, minimum: 0, maximum: 12 }
+        status: { $ref: '#/components/schemas/StudentStatus' }
+        source: { type: string, maxLength: 60 }
+
+    CreditPackage:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        student_id: { type: integer, format: int64 }
+        name: { type: string }
+        total_credits: { type: integer }
+        price_cents: { type: integer }
+        purchased_at: { type: string, format: date-time }
+        purchased_by_admin_id: { type: integer, format: int64 }
+        status: { type: string, enum: [active, void, refunded] }
+
+    CreatePackageRequest:
+      type: object
+      required: [name, total_credits, price_cents]
+      properties:
+        name: { type: string, maxLength: 120 }
+        total_credits: { type: integer, minimum: 1, maximum: 999 }
+        price_cents: { type: integer, minimum: 0 }
+
+    LedgerEntry:
+      type: object
+      description: "只增不改。无 updated_at 字段"
+      properties:
+        id: { type: integer, format: int64 }
+        student_id: { type: integer, format: int64 }
+        package_id: { type: integer, format: int64, nullable: true }
+        delta: { type: integer, description: "正=进，负=出" }
+        reason:
+          type: string
+          enum: [purchase, consume, leave_adjust, manual_adjust, refund, transfer_out]
+        lesson_id: { type: integer, format: int64, nullable: true }
+        attendance_id: { type: integer, format: int64, nullable: true }
+        actor_user_id: { type: integer, format: int64 }
+        note: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    Trial:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        student_id: { type: integer, format: int64 }
+        subject_id: { type: integer, format: int64 }
+        subject_name: { type: string }
+        teacher_id: { type: integer, format: int64 }
+        scheduled_at: { type: string, format: date-time }
+        duration_min: { type: integer }
+        outcome: { type: string, enum: [pending, converted, lost] }
+        outcome_note: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    CreateTrialRequest:
+      type: object
+      required: [student_id, subject_id, teacher_id, scheduled_at]
+      properties:
+        student_id: { type: integer, format: int64 }
+        subject_id: { type: integer, format: int64 }
+        teacher_id: { type: integer, format: int64 }
+        scheduled_at: { type: string, format: date-time }
+        duration_min: { type: integer, default: 60 }
+
+    FollowUp:
+      type: object
+      description: |
+        `model.FollowUp`（model.go:265-283），被三处复用：`/follow-ups` 列表、
+        `/students/{id}` 的 `follow_ups[]`、`POST /trials/{id}/outcome` 的 `data`。
+        **反序列化口径**：带 `omitempty` 的字段在 Go 零值时**整个键缺席**，不是 `null` ——
+        因此这些字段**刻意不写 `nullable: true`**（理由同 `TrialRow`）：那会声明一个永不出现的
+        `null`，把客户端引去判空错误的对象；判空要写 `undefined`（`?? / == null` 两者都能兜住）。
+        `due_at` / `status` / `created_at` 无 `omitempty`，**恒在**。
+      properties:
+        id: { type: integer, format: int64 }
+        student_id: { type: integer, format: int64 }
+        student_name: { type: string, description: "omitempty：无值时键缺席（undefined），非 null" }
+        trial_id: { type: integer, format: int64, description: "omitempty 指针：为 NULL 时键缺席（undefined），非 null" }
+        due_at: { type: string, format: date-time, description: "试听标记结果时写入 now+48h（R2）；无 omitempty，恒在" }
+        status: { type: string, enum: [pending, done, overdue] }
+        completed_at: { type: string, format: date-time, description: "omitempty 指针：未完成时键缺席（undefined），非 null" }
+        completed_by_user_id: { type: integer, format: int64, description: "omitempty 指针：未完成时键缺席（undefined），非 null" }
+        note: { type: string, description: "omitempty：无备注时键缺席（undefined），非 null" }
+        created_at: { type: string, format: date-time, description: "无 omitempty：恒在" }
+        overdue_hours:
+          type: integer
+          format: int64
+          description: |
+            服务端**按服务端时钟**算出的逾期小时数，措辞由前端负责（`GET /dashboard/admin` 的
+            `FollowUpRow.overdue_hours` 同一口径）。三点必须记住：
+
+            1. **只有 `status=pending` 的行才有值**（`service/trial.go:142-156`）。`model.FollowUp`
+               是 `*int64` + `omitempty`，非 pending 行**整个键缺席** —— 要判的是 `undefined`，
+               **不是 `null`**，故本字段**不写 `nullable: true`**（理由同 `TrialRow`）。
+            2. **符号约定与 `/dashboard/admin` 的 `FollowUpRow.overdue_hours` 完全一致：
+               正值 = 已逾期的小时数，负值 = 距到期还有多少小时。** 两个端点同名同义，
+               前端用一个 `overdueLabel()` 就能同时读对，**不需要按端点分支**。
+               （`service/trial.go` 用的是 `now.Sub(due_at)`；写成 `due_at.Sub(now)` 会整体反号，
+               `?status=pending` 过滤出的未来行会被前端读成「逾期 N 小时」。）
+               `?status=pending` 拿到的都是 `due_at >= now` 的**未来**行，所以那里通常是**负值**
+               （「还有 12 小时」= `-12`），`0` 表示「不足 1 小时」。
+            3. 前端对 `<= 0` 自行返回空、回落到本地 SLA 倒计时，**服务端不替它兜底** ——
+               这正是本次移除英文串（旧 `overdue_by`，如 `"12h overdue"`）的原因。
+
+    Class:
+      type: object
+      description: |
+        形状依据 `model.Class`（model.go:85-102）与 `GET /classes` 的查询（scheduling.go:60-66）。
+        注意 `enrolled` / `subject_name` / `teacher_name` 是查询期计算列，带 `omitempty`，
+        因此**可能缺席**而非为 0；客户端把它们当可选字段处理。
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        subject_id: { type: integer, format: int64 }
+        subject_name: { type: string, description: "LEFT JOIN 计算列，`omitempty`" }
+        teacher_id: { type: integer, format: int64 }
+        teacher_name: { type: string, description: "LEFT JOIN 计算列，`omitempty`" }
+        weekday: { type: integer, minimum: 0, maximum: 6, description: "0=周日 .. 6=周六" }
+        start_min: { type: integer, description: "自 00:00 起的分钟数（墨尔本墙上时间）" }
+        end_min: { type: integer }
+        capacity: { type: integer, description: "容量上限；是否满员用 `enrolled >= capacity` 判断" }
+        room: { type: string, description: "可空字符串，`omitempty`" }
+        status: { type: string, enum: [active, archived] }
+        enrolled:
+          type: integer
+          description: "当前 `status='active'` 的报名人数（子查询计算列，`omitempty`）。剩余座位 = `capacity - enrolled`"
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CreateClassRequest:
+      type: object
+      required: [name, subject_id, teacher_id, weekday, start_min, end_min, capacity]
+      properties:
+        name: { type: string, maxLength: 120 }
+        subject_id: { type: integer, format: int64 }
+        teacher_id: { type: integer, format: int64 }
+        weekday: { type: integer, minimum: 0, maximum: 6 }
+        start_min: { type: integer, minimum: 0, maximum: 1439 }
+        end_min: { type: integer, minimum: 1, maximum: 1440 }
+        capacity: { type: integer, minimum: 1, maximum: 100 }
+        room: { type: string, maxLength: 40 }
+
+    Enrollment:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        class_id: { type: integer, format: int64 }
+        student_id: { type: integer, format: int64 }
+        student_name: { type: string }
+        weekday: { type: integer, description: "自 classes 冗余，用于 uq_student_slot 唯一约束" }
+        start_min: { type: integer }
+        status: { type: string, enum: [active, withdrawn] }
+        enrolled_on: { type: string, format: date }
+        withdrawn_on: { type: string, format: date, nullable: true }
+
+    Lesson:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        class_id: { type: integer, format: int64 }
+        class_name: { type: string }
+        teacher_id: { type: integer, format: int64 }
+        lesson_date: { type: string, format: date }
+        weekday: { type: integer }
+        start_min: { type: integer }
+        end_min: { type: integer }
+        status: { type: string, enum: [scheduled, cancelled, completed] }
+        cancel_reason: { type: string, nullable: true }
+
+    RosterEntry:
+      type: object
+      properties:
+        student_id: { type: integer, format: int64 }
+        student_name: { type: string }
+        is_new_to_class: { type: boolean }
+        prefilled_status:
+          type: string
+          enum: [present, absent, leave_approved, leave_late]
+          nullable: true
+          description: "系统预填：有 leave_request 时按 24h 阈值预填 leave_approved / leave_late"
+        current_status:
+          type: string
+          enum: [present, late, absent, leave_approved, leave_late]
+          nullable: true
+        source:
+          type: string
+          enum: [prefilled, teacher_override, system]
+          nullable: true
+        balance: { type: integer }
+
+    Roster:
+      type: object
+      properties:
+        lesson: { $ref: '#/components/schemas/Lesson' }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/RosterEntry' }
+
+    Attendance:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        lesson_id: { type: integer, format: int64 }
+        student_id: { type: integer, format: int64 }
+        status: { type: string, enum: [present, late, absent, leave_approved, leave_late] }
+        source: { type: string, enum: [prefilled, teacher_override, system] }
+        recorded_by_user_id: { type: integer, format: int64, nullable: true }
+        recorded_at: { type: string, format: date-time, nullable: true }
+        note: { type: string, nullable: true }
+
+    AttendanceRecordInput:
+      type: object
+      required: [student_id, status]
+      properties:
+        student_id: { type: integer, format: int64 }
+        status:
+          type: string
+          enum: [present, late, absent]
+          description: "老师只能提交这三种；leave_approved / leave_late 由系统按 24h 阈值预填并只读"
+        note: { type: string, maxLength: 255 }
+
+    LeaveRequest:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        lesson_id: { type: integer, format: int64 }
+        student_id: { type: integer, format: int64 }
+        requested_by_user_id: { type: integer, format: int64 }
+        requested_at: { type: string, format: date-time }
+        reason: { type: string, nullable: true }
+        resolution:
+          type: string
+          enum: [approved_ge_24h, late_lt_24h]
+          description: "服务端按 (lesson.start - requested_at) >= 24h 判定"
+        created_at: { type: string, format: date-time }
+
+    AiDecisionCard:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        student_id: { type: integer, format: int64 }
+        kind: { type: string, enum: [trial_conversion, renewal_risk] }
+        ai_status:
+          type: string
+          enum: [ok, invalid, unavailable]
+          description: "invalid=输出未过白名单；unavailable=超时/失败，此时下列字段来自规则兜底引擎"
+        headline: { type: string }
+        recommendation: { type: string, description: "枚举白名单，服务端校验" }
+        confidence: { type: string, enum: [low, medium, high] }
+        reasons:
+          type: array
+          items: { type: string }
+        suggested_actions:
+          type: array
+          items: { type: string }
+        model: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    # ---- 配置与选项（形状依据 handler/ai.go:85-87、scheduling.go:87-114）----
+
+    Thresholds:
+      type: object
+      description: |
+        三个**假设值**的单一真源。前端读取后用于渲染文案，不得再本地硬编码一份。
+        改动此处会同时改变服务端判定行为与 UI 文案。
+      properties:
+        followup_sla_hours:
+          type: integer
+          default: 48
+          description: "R2：试听结束后多久内必须跟进，否则进逾期队列。env `FOLLOWUP_SLA_HOURS`"
+        leave_notice_hours:
+          type: integer
+          default: 24
+          description: "R4：提前多少小时请假才不扣课时（`>=` 该值判 `leave_approved`，否则 `leave_late` 照扣）。env `LEAVE_NOTICE_HOURS`"
+        low_credit_threshold:
+          type: integer
+          default: 4
+          description: "R6：余额 <= 该值进入低课时预警队列；余额为 0 时禁止排课。env `LOW_CREDIT_THRESHOLD`"
+
+    SubjectOption:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+
+    TeacherOption:
+      type: object
+      description: "仅 `status='active'` 的老师"
+      properties:
+        id: { type: integer, format: int64 }
+        display_name: { type: string }
+        username: { type: string }
+
+    # ---- Dashboard（形状依据 handler/dashboard.go，见 ADR-011 逐项裁定）----
+
+    AdminDashboard:
+      type: object
+      description: |
+        三条行动队列是产品主张，三个计数是队列表达不了的头部数字。
+        **注意 `today_lessons` 是整数计数，不是数组**（与首版规格的数组语义不同）——
+        点开今日课表请走 `GET /lessons?date=...`。
+      properties:
+        overdue_follow_ups:
+          type: array
+          default: []
+          description: "逾期跟进队列（超过 48h SLA 未跟进），按 due_at 升序，上限 20（R2）"
+          items: { $ref: '#/components/schemas/FollowUpRow' }
+        upcoming_trials:
+          type: array
+          default: []
+          description: "未来待上/待反馈的试听，按 scheduled_at 升序，上限 10"
+          items: { $ref: '#/components/schemas/TrialRow' }
+        low_credit:
+          type: array
+          default: []
+          description: "低课时队列（余额 <= 阈值，R6），按余额升序，上限 20"
+          items: { $ref: '#/components/schemas/LowCreditRow' }
+        today_lessons:
+          type: integer
+          description: "今日与自己学生相关的课次**数量**（计数，非数组）"
+        pending_followups: { type: integer, description: "待跟进总数（含未逾期）" }
+        overdue_followups: { type: integer, description: "逾期跟进总数（与 overdue_follow_ups.size 可能不等：后者上限 20）" }
+        low_credit_students: { type: integer, description: "低课时学生总数（与 low_credit.size 可能不等）" }
+
+    FollowUpRow:
+      type: object
+      description: |
+        逾期跟进行。`overdue_hours` 是 SQL 按服务端时钟算出的**逾期小时数**，措辞由前端负责。
+        **符号约定：正值 = 已逾期的小时数，负值 = 距到期还有多少小时** —— 与
+        `GET /follow-ups` 列表里的 `FollowUp.overdue_hours` 完全一致（见该 schema）。
+        本队列**恒不为负**（`>= 0`）：SQL 是 `TIMESTAMPDIFF(HOUR, due_at, now)`（即 `now - due_at`）且
+        已用 `due_at < now` 过滤；逾期不足 1 小时时截断为 `0`。
+        **键恒在**（结构体是非指针 `int64` 且无 `omitempty`）：该队列已被 `due_at < now` 过滤，
+        字段总有意义。`TIMESTAMPDIFF` 是**截断**的 —— 逾期不足 1 小时会诚实地得到 `0`
+        而不是 `1`，前端对 `<= 0` 自行回落，服务端不替它兜底。
+      properties:
+        id: { type: integer, format: int64 }
+        student_id: { type: integer, format: int64 }
+        student_name: { type: string }
+        due_at: { type: string, format: date-time }
+        overdue_hours: { type: integer, format: int64, example: 26 }
+
+    TrialRow:
+      type: object
+      description: |
+        仪表盘试听队列的一行。`subject_name` / `teacher_name` 在 Go 侧是
+        `model.Trial` 上带 `omitempty` 的联表派生字段（model.go:256-258）——
+        为空时**键整个缺席**，字段值不是 `null`。因此这两个字段**不写
+        `nullable: true`**：那会声明一个永远不会出现的 `null`，客户端会去判空
+        `null` 而实际要判的是 `undefined`（`?? '—'` 恰好两者都能兜住，但类型
+        声明应当描述真实情况）。此 schemas 的字段本就非 required。
+      properties:
+        id: { type: integer, format: int64 }
+        student_id: { type: integer, format: int64 }
+        student_name: { type: string }
+        subject_name:
+          type: string
+          description: 带 omitempty：无科目时键缺席（undefined），不是 null
+        teacher_name:
+          type: string
+          description: 带 omitempty：无老师时键缺席（undefined），不是 null
+        scheduled_at: { type: string, format: date-time }
+        outcome: { type: string, enum: [pending, converted, lost] }
+
+    LowCreditRow:
+      type: object
+      description: |
+        **刻意没有 "还能上几周" 字段**（handler/dashboard.go:49-53）：估算耗尽时间需要每个学生的
+        每周消耗速率，本项目没有计算它。契约若声明一个永不填充的字段，比不声明更糟 ——
+        客户端会在本该显示数字的位置渲染空白，且无法与"真的为 0"区分。
+      properties:
+        student_id: { type: integer, format: int64 }
+        full_name: { type: string }
+        balance: { type: integer, description: "剩余课时，可能为负（透支）" }
+        total_credits: { type: integer, description: "该生所有 active 课包的总课时" }
+
+    TeacherDashboard:
+      type: object
+      properties:
+        today:
+          type: array
+          default: []
+          description: "今日及以后未取消的课（`lesson_date >= 今天`），上限 30；`start_clock` 由服务端格式化"
+          items: { $ref: '#/components/schemas/TeacherLessonRow' }
+        missing_roll_call:
+          type: integer
+          description: "过去日期里仍为 `scheduled` 且有在册学生的课次数（待补点名）"
+
+    TeacherLessonRow:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        class_id: { type: integer, format: int64 }
+        class_name: { type: string }
+        subject_name: { type: string, nullable: true }
+        lesson_date: { type: string, format: date }
+        start_min: { type: integer, description: "自 00:00 起的分钟数（墨尔本墙上时间）" }
+        start_clock: { type: string, description: "服务端格式化的起始时钟，如 `\"16:00\"`", example: "16:00" }
+        status: { type: string, enum: [scheduled, cancelled, completed] }
+        students: { type: integer, description: "在册学生数（`class_enrollments.status='active'`）" }
+        new_faces: { type: integer, description: "该班首次出现在此学生课表上的人数（此前该班无出勤记录）" }
+        on_leave: { type: integer, description: "本课次已提交请假的学生数" }
+        recorded: { type: integer, description: "本课次已记录出勤的人数；`0` 即尚未点名" }
+
+    HouseholdStudentRow:
+      type: object
+      description: "家长端首屏的孩子行：先给余额，再由此进入逐条流水"
+      properties:
+        id: { type: integer, format: int64 }
+        full_name: { type: string }
+        balance: { type: integer, description: "剩余课时（`v_student_balance`），无流水时为 0" }
+        status: { type: string, enum: [lead, trial, active, churned] }

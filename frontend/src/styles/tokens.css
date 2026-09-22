@@ -1,0 +1,89 @@
+/* tokens.css —— 唯一颜色 / 间距 / 圆角真源（docs/UIUX.md 附录 A，原样采用，一个值未改）
+   组件内禁止出现裸 hex；唯一例外是 focus ring 内圈的纯白。 */
+
+:root {
+  --bg: #f4f5f6;
+  --surface: #ffffff;
+  --surface-sunken: #fbfcfc;
+  --surface-warm: #eef1f2;
+
+  --fg: #1b1c1f;
+  --fg-2: #37393e;
+  --muted: #6c6f78;
+  --meta: #9ea1a9;
+
+  --border: rgba(0, 0, 0, 0.08);
+  --border-soft: rgba(0, 0, 0, 0.05);
+  --border-strong: rgba(0, 0, 0, 0.14);
+
+  --accent: #0f5c73;
+  --accent-hover: #0c4a5c;
+  --accent-active: #093b4a;
+  --accent-bg: rgba(15, 92, 115, 0.07);
+  --accent-on: #ffffff;
+
+  --success: #15803d;
+  --success-bg: #e8f3ec;
+  --warn: #b45309;
+  --warn-bg: #fdf1e2;
+  --danger: #b91c1c;
+  --danger-bg: #fbecec;
+  --neutral-fg: #57534e;
+  --neutral-bg: #f1f3f5;
+
+  --row-hover: rgba(0, 0, 0, 0.025);
+  --credit-track: #dde1e4;
+  --sla-track: rgba(0, 0, 0, 0.06);
+
+  --font-display: 'Inter', 'Noto Sans SC', -apple-system, 'PingFang SC', sans-serif;
+  --font-body: 'Inter', 'Noto Sans SC', -apple-system, 'PingFang SC', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+
+  --text-th: 11px;
+  --leading-th: 16px;
+  --text-meta: 12px;
+  --leading-meta: 16px;
+  --text-row: 13.5px;
+  --leading-row: 20px;
+  --text-body: 14px;
+  --leading-body: 22px;
+  --text-section: 13px;
+  --leading-section: 18px;
+  --text-page: 20px;
+  --leading-page: 28px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-full: 9999px;
+
+  --shadow-popover: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.08),
+    0 0 0 1px rgba(0, 0, 0, 0.06);
+
+  --row-h-compact: 32px;
+  --row-h-default: 36px;
+  --row-h-comfortable: 44px;
+
+  --focus-ring: 0 0 0 2px #ffffff, 0 0 0 4px rgba(15, 92, 115, 0.45);
+  --motion-fast: 150ms;
+  --motion-base: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
