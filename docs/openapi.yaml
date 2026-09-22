@@ -64,8 +64,8 @@ info:
     | `POST /students` `PATCH /students/{id}` `POST /students/{id}/transfer-owner` | 是 | **403** | **403** | 写路径仅 admin（R7） |
     | `GET /students/{id}` `GET /students/{id}/credits` `GET /students/{id}/ai-cards` | 是 | 是 | 是（**仅自己孩子**，越界 40301） | 数据范围内收敛 |
     | `POST /students/{id}/credit-packages` `POST /students/{id}/credit-adjustments` | 是 | **403** | **403** | 动钱的路径仅 admin |
-    | `GET /trials` | 是 | 是 | **403** | — |
-    | `POST /trials` `POST /trials/{id}/outcome` `GET /follow-ups` `POST /follow-ups/{id}/complete` | 是 | **403** | **403** | — |
+    | `GET /trials` | 是（**仅自己名下学生的试听**） | 是（**仅自己任课的试听**） | **403** | 队列按归属收敛，口径同 `GET /follow-ups`（见该端点说明） |
+    | `POST /trials` `POST /trials/{id}/outcome` `GET /follow-ups` `POST /follow-ups/{id}/complete` | 是（**且受 R7**：只可操作自己名下学生的记录，否则 40301） | **403** | **403** | 写路径仅 admin（R7）；`GET /follow-ups` 亦按 owner 收敛 |
     | `GET /classes` `GET /classes/{id}/enrollments` | 是 | 是 | 是（**结果按自己孩子收敛**） | 无 RequireRoles |
     | `POST /classes` `POST /classes/{id}/enrollments` `DELETE /classes/{id}/enrollments/{student_id}` | 是 | **403** | **403** | — |
     | `GET /subjects` `GET /teachers` | 是 | **403** | **403** | 建班选项 |
@@ -495,6 +495,20 @@ paths:
     get:
       tags: [trials]
       summary: 试听列表
+      description: |
+        **这是顾问的个人待办队列，不是学生目录**，因此按角色收口（handler/trial.go:41-66）：
+        admin 只返回 `students.owner_admin_id = 自己` 的试听，teacher 只返回 `trials.teacher_id = 自己`
+        的试听。两条谓词都拼进 SQL，**不留给客户端过滤**（否则"过滤失效 = 全量泄露"）。
+
+        **为什么不与 R7 冲突**：R7 管的是**学生目录**（`DESIGN.md:116`：admin 可读全部学生、
+        只可写 `owner_admin_id = self` 的），`GET /students` 至今仍全量返回并逐行带 `can_write`
+        标记，那条读全量的能力没有被削弱。本端点是「今天我桌上有什么」，与同页、同角色门、
+        同一文件的 `GET /follow-ups` 完全同口径 —— 把整家公司的名单铺到某个顾问的工作台上
+        不是权限，而是噪音，用户实际反馈过这个 bug。历史上这里没有过滤，前端因此绕行改读
+        `/dashboard/admin`（`frontend/src/pages/TodayPage.tsx:9-13` 的注释记录了那次绕行），
+        而 LeadsPage 仍在直接调本端点，本轮把端点本身修掉。
+
+        **空集合契约**：无匹配时 `data` 恒为 `[]`，绝不返回 `null`。
       parameters:
         - name: student_id
           in: query
@@ -545,6 +559,18 @@ paths:
     post:
       tags: [trials]
       summary: "标记试听结果 → R2 自动生成 due_at = now + 48h 的跟进任务"
+      description: |
+        **R7 写校验**：这是写路径，事务内先按 `t.student_id` 回查归属，非本人学生即
+        `403 / code=40301`（`service/trial.go` 复用 `StudentService.AssertOwner`，
+        `service/student.go:18`）。此前这里漏了校验，等于任何 admin 都能把结果写进别人的试听。
+
+        **状态推进**：`outcome=converted` 会把该学生的 `students.status` 从 `lead` / `trial`
+        推进到 `active`（`UPDATE ... WHERE status IN ('lead','trial')` 作守卫：既不复活已
+        `churned` 的，也不覆写已 `active` 的）；`outcome=lost` **完全不动** `students.status`
+        —— 未转化的线索要留在顾问队列里继续挽回，置成 `churned` 等于自动放弃。
+        生命周期见 `model/model.go:41`（`lead -> trial -> active -> churned`）。
+
+        **审计**：同一事务内写一条 `audit_events`（`entity='trial'`、`action='outcome'`）。
       requestBody:
         required: true
         content:
@@ -570,6 +596,12 @@ paths:
                       # 前端曾按草案的包装写法做过防御（`LeadsPage.tsx:126-131` 两种都吃），
                       # 这里按实现校正，避免契约继续声明一个服务端从不返回的形状。
                       data: { $ref: '#/components/schemas/FollowUp' }
+        '403':
+          description: "R7 违反：code=40301 —— 该试听的学生不属于当前顾问"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /follow-ups:
     get:
@@ -603,6 +635,11 @@ paths:
     post:
       tags: [followups]
       summary: 完成跟进
+      description: |
+        **R7 写校验（同时堵一个 IDOR）**：`id` 本身不是授权凭据。事务内先按 id 查出
+        `follow_ups.student_id`（查不到 → 404 / code=40400），再对该学生执行
+        `StudentService.AssertOwner`（`service/student.go:18`），非本人学生即
+        `403 / code=40301`。此前只按 id 直接 UPDATE，换个 id 就能关掉别人的跟进单。
       requestBody:
         required: false
         content:
@@ -613,6 +650,12 @@ paths:
                 note: { type: string, maxLength: 500 }
       responses:
         '200': { $ref: '#/components/responses/OkEmpty' }
+        '403':
+          description: "R7 违反：code=40301 —— 该跟进单的学生不属于当前顾问"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /classes:
     get:

@@ -54,7 +54,17 @@ func (s *TrialService) CreateTrial(db *gorm.DB, t *model.Trial) error {
 // SetOutcome is R2: the moment a trial result is recorded, a follow-up
 // with a 48h due date is created in the same transaction. Nothing about
 // the SLA depends on a background job, so it is always demonstrable.
-func (s *TrialService) SetOutcome(db *gorm.DB, cfg *config.Config, trialID uint64, outcome, note string) (*model.FollowUp, error) {
+//
+// It is also a write, so R7 reaches it: the caller must own the student
+// behind the trial. The check is delegated to StudentService.AssertOwner
+// instead of being spelled out here, because "who owns this student" must
+// have exactly one implementation - a second copy is how the two drift.
+//
+// Finally it is the step that closes the lifecycle transition
+// lead -> trial -> active (model.go:41). CreateTrial performs the first
+// hop; until now nothing performed the second, so a converted prospect
+// stayed a prospect forever. Only a conversion pays that forward.
+func (s *TrialService) SetOutcome(db *gorm.DB, cfg *config.Config, trialID uint64, outcome, note string, actorID uint64, actorRole model.Role) (*model.FollowUp, error) {
 	switch outcome {
 	case "converted", "lost":
 	default:
@@ -70,10 +80,30 @@ func (s *TrialService) SetOutcome(db *gorm.DB, cfg *config.Config, trialID uint6
 		if t.ID == 0 {
 			return apierr.ErrNotFound
 		}
+		// A trial row carries no owner of its own, so ownership is asked
+		// of the student it belongs to.
+		if err := (&StudentService{}).AssertOwner(tx, actorID, actorRole, t.StudentID); err != nil {
+			return err
+		}
 		if err := tx.Exec("UPDATE trials SET outcome=?, outcome_note=?, updated_at=? WHERE id=?",
 			outcome, note, now, trialID).Error; err != nil {
 			return err
 		}
+		if outcome == "converted" {
+			// The status predicate is a guard, not a formality: without it
+			// a late conversion would resurrect an already 'churned'
+			// student, and would overwrite an 'active' one for no reason.
+			// Both cases end up a no-op rather than an error, because from
+			// the caller's side re-marking a converted trial is idempotent.
+			if err := tx.Exec("UPDATE students SET status='active', updated_at=? WHERE id=? AND status IN ('lead','trial')",
+				now, t.StudentID).Error; err != nil {
+				return err
+			}
+		}
+		// There is deliberately no else branch: "lost" touches no state at
+		// all. An unconverted prospect stays in the consultant's queue to
+		// be won back, so flipping them to 'churned' here would be
+		// abandoning them automatically.
 		due := now.Add(time.Duration(cfg.Thresholds.FollowUpSLAHours) * time.Hour)
 		fu = &model.FollowUp{
 			StudentID: t.StudentID,
@@ -82,7 +112,15 @@ func (s *TrialService) SetOutcome(db *gorm.DB, cfg *config.Config, trialID uint6
 			Status:    "pending",
 			CreatedAt: now,
 		}
-		return tx.Create(fu).Error
+		if err := tx.Create(fu).Error; err != nil {
+			return err
+		}
+		// The audit trail was missing here while enroll, withdraw,
+		// cancel_range, transfer_owner and follow-up completion all wrote
+		// one - this was the only write path that left no trace.
+		return writeAudit(tx, actorID, "trial", trialID, "outcome", map[string]interface{}{
+			"outcome": outcome, "note": note, "student_id": t.StudentID,
+		})
 	})
 	return fu, err
 }
@@ -166,9 +204,24 @@ func (s *TrialService) ListFollowUps(db *gorm.DB, f FollowUpFilter) ([]model.Fol
 	return rows, total, nil
 }
 
-func (s *TrialService) CompleteFollowUp(db *gorm.DB, actorID, id uint64, note string) error {
+// CompleteFollowUp closes a follow-up task. The id alone does not
+// authorize that: with no ownership predicate a caller could close anyone
+// else's task by guessing an id, which is the classic IDOR. So the student
+// behind the follow-up is resolved first and R7 is applied to them through
+// the same AssertOwner every other write path uses.
+func (s *TrialService) CompleteFollowUp(db *gorm.DB, actorID uint64, actorRole model.Role, id uint64, note string) error {
 	now := clock.Now()
 	return db.Transaction(func(tx *gorm.DB) error {
+		var studentID uint64
+		if err := tx.Raw("SELECT student_id FROM follow_ups WHERE id=?", id).Scan(&studentID).Error; err != nil {
+			return err
+		}
+		if studentID == 0 {
+			return apierr.ErrNotFound
+		}
+		if err := (&StudentService{}).AssertOwner(tx, actorID, actorRole, studentID); err != nil {
+			return err
+		}
 		res := tx.Exec(`UPDATE follow_ups SET status='done', completed_at=?, completed_by_user_id=?, note=?
 			WHERE id=? AND status='pending'`, now, actorID, note, id)
 		if res.Error != nil {

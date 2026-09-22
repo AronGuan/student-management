@@ -517,11 +517,11 @@ students 1──N ai_decisions
 ### 试听与跟进
 | Method | Path | 说明 |
 |---|---|---|
-| POST | `/api/v1/trials` | **R1**：同学生同科目唯一（`uq_trial_once`） |
-| GET | `/api/v1/trials` | `?student_id=&outcome=` |
-| POST | `/api/v1/trials/{id}/outcome` | 标记结果 → **R2** 自动生成 `due_at = now + 48h` 的 follow_up |
-| GET | `/api/v1/follow-ups` | `?status=pending|overdue&owner_admin_id=` |
-| POST | `/api/v1/follow-ups/{id}/complete` | 完成跟进 |
+| POST | `/api/v1/trials` | **R1**：同学生同科目唯一（`uq_trial_once`）；**R7** 写校验（非本人学生 403/40301） |
+| GET | `/api/v1/trials` | `?student_id=&outcome=`；**队列按归属收敛**：admin 只见自己名下学生的试听、teacher 只见自己任课的试听（与 `GET /follow-ups` 同口径；R7 的"读全量"由 `/students` 承担） |
+| POST | `/api/v1/trials/{id}/outcome` | 标记结果 → **R2** 自动生成 `due_at = now + 48h` 的 follow_up；**R7**：非本人学生 403/40301；`converted` 把 `students.status` 从 `lead`/`trial` 推进到 `active`，`lost` 不动状态 |
+| GET | `/api/v1/follow-ups` | `?status=pending|overdue&owner_admin_id=`（admin 不传该参数时自动收敛到自己名下学生） |
+| POST | `/api/v1/follow-ups/{id}/complete` | 完成跟进；**R7**：按 `follow_ups.student_id` 回查归属，非本人学生 403/40301 |
 
 ### 班级与排班
 | Method | Path | 说明 |
@@ -603,7 +603,7 @@ students 1──N ai_decisions
 | R4 按出勤扣课时 / ≥24h 请假不扣 | `uq_ledger_consume` 幂等 | service 判定状态与 24h 阈值 | — |
 | R5 Ledger 只增不改、余额=sum | 无 `updated_at` 列 + `CHECK(delta<>0)` + 只授 INSERT | repository 无 Update 方法 | — |
 | R6 余额≤4 预警、=0 不许排课 | — | 预警由查询实现；=0 在排班事务 (d) 步拦截 40904 | 余额 Badge |
-| R7 admin 只能写自己的学生 | — | `CanWriteStudent` 中间件实时查 `owner_admin_id` | 隐藏编辑入口 |
+| R7 admin 只能写自己的学生 | — | 写路径在 service 层调 `StudentService.AssertOwner`（`service/student.go:18`），每次请求重读 `students.owner_admin_id`、从不缓存；**是逐路径显式调用，不是全局中间件** | 隐藏编辑入口 |
 | 读作用域（R7 的对偶） | — | admin 读全量；teacher 读自己班；**household 只读自己孩子**（`/classes`、`/classes/{id}/enrollments` 按 active 报名过滤，`/students/{id}`、`/students/{id}/credits` 越界返回 403/40301） | 只渲染自己孩子的入口 |
 | 参数解析失败 | — | 数字型 query 非法 → `400/40000`，**禁止静默忽略**（否则过滤失效 = 全量泄露） | 输入前校验并禁用提交 |
 | 空集合序列化 | — | handler 统一把 `nil` 切片规整为 `[]`，**禁止输出 `null`** | `.map()` 不因空集合崩溃 |

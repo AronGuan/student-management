@@ -17,7 +17,12 @@ type TrialHandler struct {
 }
 
 func (h *TrialHandler) List(c *gin.Context) {
-	var rows []model.Trial
+	// Initialised, not declared nil: with the ownership scoping below an
+	// empty result is now a normal event (a consultant with no trials of
+	// their own), and a nil slice would serialise as `data: null` instead
+	// of `data: []`. Same reason service/trial.go does this for
+	// follow-ups; the project rule is that a list endpoint never emits null.
+	rows := []model.Trial{}
 	q := `SELECT t.*, s.full_name AS student_name, sub.name AS subject_name, u.display_name AS teacher_name
 		FROM trials t
 		JOIN students s ON s.id = t.student_id
@@ -32,6 +37,32 @@ func (h *TrialHandler) List(c *gin.Context) {
 	if v := c.Query("outcome"); v != "" {
 		q += " AND t.outcome = ?"
 		args = append(args, v)
+	}
+	// /trials is a consultant's personal work queue, not the student
+	// directory, so it is scoped by role exactly as GET /follow-ups further
+	// down this file is: an admin sees the trials of the students they own,
+	// a teacher sees the trials they are assigned to run. Leaving it
+	// unscoped was a real defect - a consultant's board filled with
+	// colleagues' trials - and the page worked around it by reading
+	// /dashboard/admin instead, while LeadsPage kept calling this route.
+	//
+	// This does not contradict R7, which is about the student *directory*
+	// ("admin may read every student, may only write the ones they own").
+	// Reading every student stays available through GET /students, which is
+	// deliberately still unscoped and marks each row with can_write. A queue
+	// answers a different question - what is on my desk today - and
+	// answering it with the whole company's list is not a privilege, it is
+	// noise.
+	cu := middleware.Current(c)
+	if cu != nil {
+		switch cu.Role {
+		case model.RoleAdmin:
+			q += " AND s.owner_admin_id = ?"
+			args = append(args, cu.ID)
+		case model.RoleTeacher:
+			q += " AND t.teacher_id = ?"
+			args = append(args, cu.ID)
+		}
 	}
 	q += " ORDER BY t.scheduled_at DESC LIMIT 100"
 	if err := DB.Raw(q, args...).Scan(&rows).Error; err != nil {
@@ -61,6 +92,7 @@ func (h *TrialHandler) Create(c *gin.Context) {
 }
 
 // SetOutcome is R2: recording the result is what starts the 48h clock.
+// It is also a write, so the caller is passed down for the R7 check.
 func (h *TrialHandler) SetOutcome(c *gin.Context) {
 	id, ok := parseID(c, "id")
 	if !ok {
@@ -75,7 +107,8 @@ func (h *TrialHandler) SetOutcome(c *gin.Context) {
 		Fail(c, errBadBody)
 		return
 	}
-	fu, err := h.Trials.SetOutcome(DB, h.Cfg, id, body.Outcome, body.Note)
+	cu := middleware.Current(c)
+	fu, err := h.Trials.SetOutcome(DB, h.Cfg, id, body.Outcome, body.Note, cu.ID, cu.Role)
 	if err != nil {
 		Fail(c, err)
 		return
@@ -114,7 +147,7 @@ func (h *TrialHandler) CompleteFollowUp(c *gin.Context) {
 	}
 	_ = c.ShouldBindJSON(&body)
 	cu := middleware.Current(c)
-	if err := h.Trials.CompleteFollowUp(DB, cu.ID, id, body.Note); err != nil {
+	if err := h.Trials.CompleteFollowUp(DB, cu.ID, cu.Role, id, body.Note); err != nil {
 		Fail(c, err)
 		return
 	}
