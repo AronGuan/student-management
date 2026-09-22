@@ -171,10 +171,18 @@ DEEPSEEK_API_KEY=sk-...        # 可选；没有它 AI 卡会降级成规则卡�
 
 - **`DB_DSN` 必须整体加引号**：值里有 `%2F`，不加引号在 dotenv 解析里会被当成转义。
 - **`loc=Australia%2FMelbourne` 是承重的**，不是装饰。少了它，`DATETIME` 的解析时区就错了。
-- **`CORS_ORIGINS` 只对「直连后端」的调用方有意义**。浏览器走的是前端同源的 `/api` 代理，
-  同源请求根本不触发 CORS。但 `curl` / Postman 直连 `19080` 时会用到它 —— 这一项配错的表现很隐蔽：
-  **preflight 被拒，没有响应体，服务端日志里也没有任何一行**，浏览器报 CORS 错误而 API 看起来好好的。
-  所以 `config.go:58` 把它做成了可配置项，而不是硬编码。
+- **`CORS_ORIGINS` 不是「只给直连调用方用的」，它走的是必经之路**。浏览器请求 `/api` 时，
+  代理（`vite.config.ts:20-25`）只改写了 `Host` —— `changeOrigin: true`（`vite.config.ts:23`）
+  把 `Host: <ecs-ip>:19073` 换成后端目标地址，而**浏览器的 `Origin` 是原样透传的**。
+  于是 `gin-contrib/cors` 里那条「`Origin` 等于 `Host` 就当作同源、直接放行」的捷径
+  （该模块自己的 `config.go:77-88`，不是本仓的 `config/config.go`）**在「浏览器 → 代理 → 后端」
+  这条路上永远不成立**，白名单成了唯一出口：
+  `Origin` 不在列表里就直接 `AbortWithStatus(403)`，**响应体是空的**。
+  ⇒ 部署到 ECS **必须**把前端地址填进去。注意 `.env.example:11-20` 里这一项是**注释状态**的，
+  照抄着写 `.env` 会把它漏掉（这正是线上那次登录 403 的成因）。表现很隐蔽但可辨认：
+  请求 **403 且响应体为空**，而服务端日志里其实**有**一行 —— `| 403 | ... POST "/api/v1/auth/login"`
+  （`cmd/server/main.go:70` 的 `gin.Logger()` 注册在 `router.go:41` 的 cors 之前，所以它照打不误）。
+  所以 `config/config.go:80` 把它做成了可配置项，而不是硬编码。
 
 ### 3.3 权限与换行符
 
@@ -411,18 +419,25 @@ tail -f /opt/ae/.run/frontend.log    # 前端：vite preview 的启动行 + 代�
 
 | 症状 | 病因 | 怎么办 |
 |---|---|---|
-| 日志里出现 `DB_DSN has no database name` | **`DB_DSN` 是空的**（`.env` 没读到或没解析成功）—— 与网络无关。见 §6.4 | `file .env` 查 BOM；核对键名 |
+| 日志里出现 `DB_DSN has no database name` | **`DB_DSN` 是空的**（`.env` 没读到或没解析成功）—— 与网络无关。见 §6.4 | 按 §6.4 查非法字节（BOM 只是其中一种）；核对键名 |
 | `did NOT answer /healthz within 15s`，且日志里 Go 一行都没打、进程还活着 | 卡在连库上（端口被 DROP 会让连接挂住而不是报错）。见 §6.4 末段 | 先跑 §6.4 的可达性检查 |
 | 同上，但日志里有 `db:` / `database bootstrap:` 的其它内容 | 后端起来了又立刻死了 | 看 `.run/backend.log` 最后 20 行 |
 | 打印 `schema is not loaded` 后退出 | 迁移没跑 | `cd backend && ../.run/ae-api -migrate` |
 | 页面能打开但每个接口都 404 或返回 HTML | 前端的 `preview.proxy` 没生效，`/api` 落到了 SPA 回退上（**返回 200 + `index.html`**，看起来像「接口返回了 HTML」而不是「没有代理」） | 确认 `vite.config.ts` 里 `preview` 段有 `proxy`；`frontend.log` 里重启后应能看到代理相关的行 |
-| 浏览器控制台报 CORS，但服务端日志一片空白 | 你在**直连** 19080，而 `CORS_ORIGINS` 里没放行前端地址 | 把 `http://<ecs-ip>:19073` 加进 `CORS_ORIGINS`，重启后端 |
+| 登录（或任何 POST）返回 **403 且响应体为空**，服务端日志里只有一行 `\| 403 \|` | **`Origin` 不在 `CORS_ORIGINS` 里**。**走代理也会中招**：代理把 `Host` 改写成后端地址，`gin-contrib/cors` 的「`Origin` 等于 `Host` 就放行」分支永远不成立（见 §3.2） | 把浏览器地址栏里的 origin（含端口、**不要尾斜杠**）加进 `CORS_ORIGINS`，重启后端 |
+| 403，但响应体是 `{"code":40300,...}` 这样的 JSON envelope | 角色 / 账号问题（无权限、凭据错、账号停用），**不是** CORS | 按 `code` / `message` 排查 |
 | 登录成功但立刻掉线 | Cookie 跨源了 —— `ae_token` 是 httpOnly Cookie，前端必须与 API 同源 | 不要改成让前端直连 19080；走代理（或 Nginx 反代） |
 | `bad interpreter: /usr/bin/env bash^M` | 脚本是 CRLF | `sed -i 's/\r$//' scripts/*.sh` |
 | 端口被占用，脚本拒绝启动 | 上一次没停干净，或别的服务占了 | `ss -ltnp \| grep :19080`；`bash scripts/stop-all.sh` |
 | `npm ci` 报 `EBADENGINE` 或 vite 起不来 | Node < 20.19 | 升 Node；`node -v` 先确认 |
 | `vite build` 被 OOM kill | 1C1G 机器构建内存不足 | 加 swap，或 `NODE_OPTIONS=--max-old-space-size=1536 npm run build`，或在本机构建后传 `dist/` |
 | 时间显示差 2 或 4 小时 | 有人往 SQL 里加了 `NOW()` | 业务时间必须走 `internal/clock`；见 ADR-007 |
+
+**一秒区分 403 的两种来源：看响应体是否为空。**
+`backend/` 里所有业务 403 都走 `respond.go` 的 `Fail` / `FailWith` 或 `middleware/auth.go:106`
+的 `AbortWithStatusJSON`，**响应体一定是 `{code,data,message}`**；而 cors 中间件拒绝时用的是
+`AbortWithStatus(403)`，**响应体一定是空的**。所以「**403 且响应体为空**」是全仓唯一的 CORS 拒绝指纹 ——
+只要 403 的 body 里能解析出 `code`，就跟 `CORS_ORIGINS` 无关。
 
 ### 6.3 存活检查
 
@@ -454,24 +469,45 @@ ss -ltnp | grep -E ':(19073|19080)\b'
 | `.env` 的形态 | `Load` 返回 | 结果 |
 |---|---|---|
 | 正常（首行注释、CRLF 行尾） | `nil` | 正确 ✓ |
-| **带 UTF-8 BOM** | `unexpected character "禄" in variable name` | **所有变量都没设** |
+| 首行开头有 **UTF-8 BOM** | 首行的第一个字符非法（报错里 `%q` 括起的**就是**那个非法字节） | **所有变量都没设** |
 | **有一行没有 `=`** | `unexpected character "\n" in variable name` | **所有变量都没设** |
+| **混进一个不可见的 C1 控制字节**（如 U+008E） | `unexpected character "\u008e" in variable name` | **所有变量都没设** |
 | 某行引号没闭合 | `nil` | 那一行之后被吞进同一个值，`DB_DSN` 为空 |
 
-**BOM 是最阴的一种**：它在任何编辑器里都不可见，而 Windows PowerShell 5.1 的
-`Set-Content -Encoding utf8` 默认就会写入它。
+> 上表是 `godotenv` 自身的行为。本仓 `config/config.go:59-62` 现在会在 `Load` 报错时直接把错误抛出来，
+> `cmd/server/main.go:28` 的 `log.Fatalf("config: %v", err)` 会让进程当场退出 —— 所以你更可能看到的是
+> `config: cannot parse ../.env: unexpected character ...`，而不是那句「DB_DSN has no database name」。
+> 两者指向同一个根因：**`.env` 里有非法字节**。
 
-**一条命令查出来：**
+报错里被 `%q` 括起来的那个字符**就是文件里那个非法字节本身**，所以第一件事是认出它是什么：
+
+- 渲染成 `\ufeff` ⇒ BOM（U+FEFF）。
+- 渲染成 `\u008e` 这种 `\u00XX` ⇒ 一个**C1 控制字符**（`\u008e` 在 UTF-8 里是字节 `C2 8E`），
+  和 BOM 不是一回事。`.env.example` 里带大量**中文注释**，复制 / 传输 / 编辑器「另存为」
+  最容易把其中几个字节改坏。
+
+定位**所有**非 ASCII 字节（BOM 只是其中一种形态）：
 
 ```bash
-file /root/student-management/.env
-head -c 3 /root/student-management/.env | od -An -tx1     # ef bb bf = 有 BOM
+LC_ALL=C grep -nP '[^\x09\x0A\x0D\x20-\x7E]' /opt/ae/.env   # 列出含非 ASCII 字节的行
+od -c /opt/ae/.env | sed -n '1,5p'                          # 直接看前几行的原始字节
+```
+
+`.env` 应该是**纯 ASCII**。而**一处损坏会让整份文件失效**（godotenv 全有或全无，见上表）
+⇒ **服务器上的 `.env` 只留 `键=值`，把中文注释删掉**，不要连 `.env.example` 的注释一起带上去。
+
+BOM 只是其中一种形态：它在任何编辑器里都不可见，而 Windows PowerShell 5.1 的
+`Set-Content -Encoding utf8` 默认就会写入它。确认与去掉：
+
+```bash
+file /opt/ae/.env
+head -c 3 /opt/ae/.env | od -An -tx1     # ef bb bf = 有 BOM
 ```
 
 `file` 回 `UTF-8 Unicode (with BOM) text` 就是它。去掉：
 
 ```bash
-sed -i '1s/^\xEF\xBB\xBF//' /root/student-management/.env
+sed -i '1s/^\xEF\xBB\xBF//' /opt/ae/.env
 ```
 
 传文件时就要留意来源：`scp` 原文件不会加 BOM，「另存为 UTF-8 with BOM」或 PowerShell 重写会。
@@ -625,7 +661,8 @@ addr := "127.0.0.1:" + cfg.Port
 - [ ] `.env` 里 `JWT_SECRET` 已换成随机串（不是 `dev-only-secret-change-me`）
 - [ ] `.env` 里 `DB_DSN` 整体带引号，含 `loc=Australia%2FMelbourne`
 - [ ] `.env` 里 `PORT=19080` 与脚本的 `BACKEND_PORT` 一致
-- [ ] `CORS_ORIGINS` 含 `http://<ecs-ip>:19073`
+- [ ] `CORS_ORIGINS` 含 `http://<ecs-ip>:19073`，**并且这一行在 `.env` 里没有被注释掉**
+      （`.env.example` 里它是注释状态，最容易照抄着漏掉；漏掉的表现是登录 403 且响应体为空）
 - [ ] `chmod +x scripts/*.sh`
 - [ ] `-migrate` 跑过，且输出里包含全部 4 个迁移
 - [ ] `-seed` 跑过且退出码为 0（仅首次 / 需要重置时）

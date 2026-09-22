@@ -87,7 +87,7 @@ MySQL 8（阿里云 `39.102.63.30:3306`）。
 | Claims | `sub`(**username**，`middleware/auth.go:49`) `uid`(user_id，自定义字段，不在 JWT 标准集里) `role` `name` `iat` `exp`。**没有 `sid`**；`jti` 从未填充（`RegisteredClaims.ID` 留空 ⇒ 整键缺席） |
 | TTL | **Access Token 8 小时**（一个工作日），**MVP 不实现 refresh token**（明确降级，见 ADR-003） |
 | 传递方式 | **双通道**：浏览器走 httpOnly Cookie `ae_token`（SameSite=Lax，生产加 Secure；Vite dev 用 `server.proxy` 把 `/api` 代理到 `127.0.0.1:19080` 保证同源）；curl / Postman 走 `Authorization: Bearer <token>` |
-| CSRF | `SameSite=Lax` 的 httpOnly Cookie（跨站表单提交带不上凭据）+ CORS 白名单（`config.CORS_ORIGINS`，默认放行前端两个源；`handler/router.go:36-43`）。**没有独立的 Origin 校验中间件**：跨站读取由 CORS 阻断，跨站写入由 SameSite 阻断 |
+| CSRF | `SameSite=Lax` 的 httpOnly Cookie（跨站表单提交带不上凭据）+ CORS 白名单（`config.CORS_ORIGINS`，默认放行前端两个源，`config/config.go:80`；中间件挂载在 `handler/router.go:41-48`）。**没有独立的 Origin 校验中间件**：跨站读取由 CORS 阻断，跨站写入由 SameSite 阻断 |
 | Gin 中间件 | 只有两个：`middleware.AuthRequired(secret)` 从 httpOnly Cookie 或 `Authorization: Bearer` 取 token，校验后注入 `middleware.CurrentUser{ID, Role, Name}`；`middleware.RequireRoles(...)` 做角色准入。**R7 的归属校验不在中间件链上**——写路径的 URL 参数是 trial / follow_up / lesson 的 id，从它推不出 `student_id`，所以校验落在 service 层，由 `StudentService.AssertOwner`（`service/student.go:18`）逐路径显式调用 |
 | 口令 | bcrypt（`golang.org/x/crypto/bcrypt`），cost 10 |
 
@@ -625,7 +625,7 @@ students 1──N ai_decisions
 - 前端 `npm run build` → `frontend/dist`，Nginx `root` 指向它，`try_files $uri /index.html`（SPA 回退）。
 - Nginx `location /api/ { proxy_pass http://127.0.0.1:19080; proxy_set_header Host $host; ... }`。**必须反代，不能改成让前端直连 19080**：前端只请求同源的 `/api/v1`，而 `ae_token` 是 httpOnly Cookie，一旦跨源，登录态就断了。
 - Go 编译：`CGO_ENABLED=0 go build -o /opt/ae/ae-api ./cmd/server`，systemd 托管，`Environment=PORT=19080`、`Environment=JWT_SECRET=...`、`Environment=DB_DSN=...`（变量名以 `config/config.go` 为准；env 文件不进仓库）。
-- 换机器就把前端地址写进 `CORS_ORIGINS`（逗号分隔；默认只放行 localhost / 127.0.0.1 的 `19073`）。这一项只管直连的调用方 —— 走同源代理的浏览器请求根本不触发 CORS。
+- 换机器就把前端地址写进 `CORS_ORIGINS`（逗号分隔；默认只放行 localhost / 127.0.0.1 的 `19073`）。**这一项不是只给直连调用方用的**：Vite 代理只改写 `Host`（`changeOrigin: true`，`frontend/vite.config.ts:23`），浏览器的 `Origin` 会原样到达后端，于是 `gin-contrib/cors` 里「`Origin` 等于 `Host` 就放行」那条捷径永远不成立，白名单成了必经之路。漏配的表现是 **403 且响应体为空**（cors 中间件走 `AbortWithStatus`，不写 body），服务端日志里只有一行 `| 403 |`。
 
 **两条形状共用的步骤**
 
