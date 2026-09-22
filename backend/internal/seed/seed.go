@@ -383,6 +383,9 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 			}
 			note := "Trial booked from " + sources[i%len(sources)]
 			_ = tx.Exec("UPDATE trials SET outcome_note=? WHERE id=?", note, t.ID)
+			if err := promoteForTrial(tx, now, st.ID, plan.outcome); err != nil {
+				return err
+			}
 
 			dueAt := scheduled.Add(48 * time.Hour)
 			fu := &model.FollowUp{
@@ -455,6 +458,10 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 			}
 			note := "Trial booked from " + sources[i%len(sources)]
 			_ = tx.Exec("UPDATE trials SET outcome_note=? WHERE id=?", note, t.ID)
+			// Still pending, so only the booking hop applies.
+			if err := promoteForTrial(tx, now, st.ID, "pending"); err != nil {
+				return err
+			}
 
 			// The follow-up is created at booking time and falls due 48h
 			// after the trial, so it is pending but not yet overdue. That
@@ -581,6 +588,34 @@ func trialNote(outcome string) string {
 	return "Child found the pace fast; parent wants to think about it."
 }
 
+// promoteForTrial replays the student-lifecycle hops that the service layer
+// performs, for the trials this file writes directly.
+//
+// The seed inserts trials with tx.Create instead of going through CreateTrial
+// and SetOutcome, so it has to replay what those do to the student:
+// CreateTrial performs lead -> trial (service/trial.go:49), and a conversion
+// performs trial -> active (service/trial.go). Leaving both out is what let a
+// converted trial sit on a student still marked "已约试听" - the snapshot
+// contradicted the rule the service enforces at runtime, and at demo time a
+// skipped lifecycle hop is indistinguishable from a broken feature.
+//
+// Both statements are guarded rather than unconditional: a student who has
+// already passed the hop is left alone, so a 'churned' student is never
+// resurrected and an 'active' one is never rewritten. Any outcome other than
+// "converted" - "pending", "lost" - replays only the booking hop, which is
+// right because a lost trial leaves the student where the booking put them.
+func promoteForTrial(tx *gorm.DB, now time.Time, studentID uint64, outcome string) error {
+	if err := tx.Exec("UPDATE students SET status='trial', updated_at=? WHERE id=? AND status='lead'",
+		now, studentID).Error; err != nil {
+		return err
+	}
+	if outcome != "converted" {
+		return nil
+	}
+	return tx.Exec("UPDATE students SET status='active', updated_at=? WHERE id=? AND status IN ('lead','trial')",
+		now, studentID).Error
+}
+
 // reportStates prints the counts the dashboard should show, so a broken
 // seed is obvious immediately rather than at demo time.
 func reportStates(tx *gorm.DB, now time.Time, cfg *config.Config) error {
@@ -605,6 +640,31 @@ func reportStates(tx *gorm.DB, now time.Time, cfg *config.Config) error {
 	}
 	if lowCredit == 0 {
 		return fmt.Errorf("seed produced no low-credit students; the R6 queue would look empty")
+	}
+
+	// The student lifecycle is lead -> trial -> active -> churned and the
+	// snapshot must not contradict it. A converted trial on a student still
+	// marked lead/trial reads as "the conversion did not take"; any trial at
+	// all on a lead student means the lead -> trial hop was skipped. Both
+	// are invisible in the workbench counters above, so they get their own
+	// check rather than relying on promoteForTrial being called correctly.
+	var convertedStillProspect, bookedStillLead int
+	if err := tx.Raw(`SELECT COUNT(*) FROM students s JOIN trials t ON t.student_id = s.id
+		WHERE s.deleted_at IS NULL AND t.outcome = 'converted' AND s.status IN ('lead','trial')`).
+		Scan(&convertedStillProspect).Error; err != nil {
+		return err
+	}
+	if err := tx.Raw(`SELECT COUNT(*) FROM students s JOIN trials t ON t.student_id = s.id
+		WHERE s.deleted_at IS NULL AND s.status = 'lead'`).Scan(&bookedStillLead).Error; err != nil {
+		return err
+	}
+	if convertedStillProspect > 0 {
+		return fmt.Errorf("seed produced %d converted trial(s) whose student is still lead/trial; the conversion would look like it did not take",
+			convertedStillProspect)
+	}
+	if bookedStillLead > 0 {
+		return fmt.Errorf("seed produced %d student(s) marked lead but holding a trial; the lead -> trial hop is missing",
+			bookedStillLead)
 	}
 	return nil
 }
