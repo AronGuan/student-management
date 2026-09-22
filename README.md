@@ -31,7 +31,7 @@ cp .env.example .env
 ```
 
 ```dotenv
-PORT=8080
+PORT=19080
 DB_DSN="user:password@tcp(127.0.0.1:3306)/student_management?charset=utf8mb4&parseTime=true&loc=Australia%2FMelbourne"
 JWT_SECRET=any-random-string
 DEEPSEEK_API_KEY=sk-...          # 可选；没有它 AI 卡会降级，但什么都不会坏
@@ -116,14 +116,14 @@ go run ./cmd/server -seed        # 载入演示数据
 ### 1.3 启动
 
 ```bash
-# 终端 1 —— API 监听 :8080
+# 终端 1 —— API 监听 :19080
 cd backend && go run ./cmd/server
 
-# 终端 2 —— UI 监听 :5173
+# 终端 2 —— UI 监听 :19073
 cd frontend && npm install && npm run dev
 ```
 
-打开 <http://localhost:5173>，用下面任意一个账号登录：
+打开 <http://localhost:19073>，用下面任意一个账号登录：
 
 | 角色 | 用户名 | 密码 | 落地页 |
 |---|---|---|---|
@@ -148,7 +148,7 @@ API **刻意接受两种凭据通道**：给浏览器用的 `httpOnly` Cookie，
 `Authorization: Bearer`。后者存在的意义，就是让评审者不打开浏览器也能证明规则成立。
 
 ```bash
-API=http://localhost:8080/api/v1
+API=http://localhost:19080/api/v1
 TOKEN=$(curl -s -X POST $API/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"mei.lin","password":"demo1234"}' | python -c 'import sys,json;print(json.load(sys.stdin)["data"]["token"])')

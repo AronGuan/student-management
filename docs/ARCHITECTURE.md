@@ -86,8 +86,8 @@ MySQL 8（阿里云 `39.102.63.30:3306`）。
 | 密钥 | 环境变量 **`JWT_SECRET`**（`config/config.go:24`、`:45`），**有默认值 `dev-only-secret-change-me`**，启动**既不校验长度也不 panic**。`.env.example` 只放占位、`.env` 不进仓库，生产由 systemd 显式注入（见 §8）。ADR-003 当初写的「缺失即 panic」**从未实现** |
 | Claims | `sub`(**username**，`middleware/auth.go:49`) `uid`(user_id，自定义字段，不在 JWT 标准集里) `role` `name` `iat` `exp`。**没有 `sid`**；`jti` 从未填充（`RegisteredClaims.ID` 留空 ⇒ 整键缺席） |
 | TTL | **Access Token 8 小时**（一个工作日），**MVP 不实现 refresh token**（明确降级，见 ADR-003） |
-| 传递方式 | **双通道**：浏览器走 httpOnly Cookie `ae_token`（SameSite=Lax，生产加 Secure；Vite dev 用 `server.proxy` 把 `/api` 代理到 `127.0.0.1:8080` 保证同源）；curl / Postman 走 `Authorization: Bearer <token>` |
-| CSRF | `SameSite=Lax` 的 httpOnly Cookie（跨站表单提交带不上凭据）+ CORS 只放行 Vite 两个源（`handler/router.go:39-46`）。**没有独立的 Origin 校验中间件**：跨站读取由 CORS 阻断，跨站写入由 SameSite 阻断 |
+| 传递方式 | **双通道**：浏览器走 httpOnly Cookie `ae_token`（SameSite=Lax，生产加 Secure；Vite dev 用 `server.proxy` 把 `/api` 代理到 `127.0.0.1:19080` 保证同源）；curl / Postman 走 `Authorization: Bearer <token>` |
+| CSRF | `SameSite=Lax` 的 httpOnly Cookie（跨站表单提交带不上凭据）+ CORS 白名单（`config.CORS_ORIGINS`，默认放行前端两个源；`handler/router.go:36-43`）。**没有独立的 Origin 校验中间件**：跨站读取由 CORS 阻断，跨站写入由 SameSite 阻断 |
 | Gin 中间件 | 只有两个：`middleware.AuthRequired(secret)` 从 httpOnly Cookie 或 `Authorization: Bearer` 取 token，校验后注入 `middleware.CurrentUser{ID, Role, Name}`；`middleware.RequireRoles(...)` 做角色准入。**R7 的归属校验不在中间件链上**——写路径的 URL 参数是 trial / follow_up / lesson 的 id，从它推不出 `student_id`，所以校验落在 service 层，由 `StudentService.AssertOwner`（`service/student.go:18`）逐路径显式调用 |
 | 口令 | bcrypt（`golang.org/x/crypto/bcrypt`），cost 10 |
 
@@ -613,12 +613,25 @@ students 1──N ai_decisions
 
 ## 8. 部署
 
+本仓给出两条形状，按需要选一条。两者共用同一对端口：API `19080`、UI `19073`。
+
+**A. 轻量（一条命令起停，适合演示机）**
+
+- 前端 `npm run build` → `frontend/dist`，再由 `vite preview` 托管。`vite.config.ts` 的 **`preview` 段同时配了 `/api` 代理与 `host: true`**，这一段不是可选项：只配 `server.proxy` 的话，构建产物跑在预览端口上拿不到 `/api`，浏览器会把 SPA 的 `index.html` 当成接口响应收下（200 + HTML），看起来像「接口返回了 HTML」而不是「没有代理」。
+- 启停走 `scripts/`：`start-all.sh` / `stop-all.sh`，pid 文件与日志落在 `.run/`。
+
+**B. 正式（Nginx + systemd）**
+
 - 前端 `npm run build` → `frontend/dist`，Nginx `root` 指向它，`try_files $uri /index.html`（SPA 回退）。
-- Nginx `location /api/ { proxy_pass http://127.0.0.1:8080; proxy_set_header Host $host; ... }`。
-- Go 编译：`CGO_ENABLED=0 go build -o /opt/ae/ae-api ./cmd/server`，systemd 托管，`Environment=JWT_SECRET=...`、`Environment=DB_DSN=...`（变量名以 `config/config.go` 为准；env 文件不进仓库）。
+- Nginx `location /api/ { proxy_pass http://127.0.0.1:19080; proxy_set_header Host $host; ... }`。**必须反代，不能改成让前端直连 19080**：前端只请求同源的 `/api/v1`，而 `ae_token` 是 httpOnly Cookie，一旦跨源，登录态就断了。
+- Go 编译：`CGO_ENABLED=0 go build -o /opt/ae/ae-api ./cmd/server`，systemd 托管，`Environment=PORT=19080`、`Environment=JWT_SECRET=...`、`Environment=DB_DSN=...`（变量名以 `config/config.go` 为准；env 文件不进仓库）。
+- 换机器就把前端地址写进 `CORS_ORIGINS`（逗号分隔；默认只放行 localhost / 127.0.0.1 的 `19073`）。这一项只管直连的调用方 —— 走同源代理的浏览器请求根本不触发 CORS。
+
+**两条形状共用的步骤**
+
 - 建库与账号：`CREATE DATABASE student_management CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`；建专用 app 账号 `ae_app`（全库 SELECT/INSERT/UPDATE/DELETE，`credit_ledger` 收回 UPDATE/DELETE）。语句见 ADR-002。
-- 迁移：`migrate -path backend/migrations -database "mysql://<admin>@tcp(39.102.63.30:3306)/student_management" up`（发布前置步骤，**用管理账号**，与应用启动解耦；迁移完成后才对 `credit_ledger` 收权）。
-- 开发态：Vite `server.proxy` 把 `/api` 代理到 `127.0.0.1:8080`，保证 Cookie 同源。
+- 迁移：**用本仓自带的 runner，不要用 `golang-migrate` CLI** —— `go run ./cmd/server -migrate`，或已编译的 `./ae-api -migrate`。迁移是发布前置步骤，与应用启动解耦（`migrate.go` 读 `backend/migrations/*.up.sql`）。**两者不能混用**：本仓的 `schema_migrations` 是 `(version VARCHAR(64), applied_at DATETIME(3))`，golang-migrate 默认建的是 `(version BIGINT, dirty BOOL)` —— 同名不同结构，换用其一会在读版本号时炸掉。
+- 开发态：Vite `server.proxy` 把 `/api` 代理到 `127.0.0.1:19080`，保证 Cookie 同源。
 
 ---
 

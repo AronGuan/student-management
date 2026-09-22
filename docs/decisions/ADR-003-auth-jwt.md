@@ -14,7 +14,7 @@ Accepted (Phase 1)
 4. **TTL 8 小时**（一个工作日）。
 5. **不实现 refresh token**。这是明确的 MVP 降级：8h 过期后重新登录。理由：refresh 要引入 token 轮换、撤销表与另一组错误分支，10h 预算里换不来对应的评分收益。
 6. **双通道传递**：
-   - 浏览器：httpOnly Cookie `ae_token`，`SameSite=Lax`、`Path=/`，生产环境加 `Secure`。Vite dev 用 `server.proxy` 把 `/api` 代理到 `127.0.0.1:8080` 保证同源，避免跨域 Cookie 问题。
+   - 浏览器：httpOnly Cookie `ae_token`，`SameSite=Lax`、`Path=/`，生产环境加 `Secure`。Vite 用 `server.proxy`（dev）与 `preview.proxy`（构建产物）把 `/api` 代理到 `127.0.0.1:19080` 保证同源，避免跨域 Cookie 问题。
    - `curl` / Postman：`Authorization: Bearer <token>`。中间件先读 Cookie，读不到再读 Header。
 7. **中间件链**：`OriginCheck` → `Authn`（解析 JWT，注入 `domain.Actor`）→ `RequireRole(...)` → `CanWriteStudent`（R7：从路径取 `student_id`，实时查 `students.owner_admin_id` 与 `actor.ID` 比对，**不缓存**）。
 8. **口令** bcrypt cost 10（`golang.org/x/crypto/bcrypt`）。

@@ -34,10 +34,12 @@ func Register(r *gin.Engine, d *Deps) {
 	dash := &DashboardHandler{Cfg: d.Cfg}
 
 	// Front end runs on a different origin in dev, so credentials are
-	// allowed explicitly rather than wildcarded.
-	CORSOrigin := "http://localhost:5173"
+	// allowed explicitly rather than wildcarded. The allowlist is config-driven
+	// (config.CORS_ORIGINS) because it carries the front end's port, which has
+	// already moved once - and a stale entry here fails only in the browser, as
+	// a preflight rejection with no body and nothing in the server log.
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{CORSOrigin, "http://127.0.0.1:5173"},
+		AllowOrigins:     d.Cfg.CORSOrigin,
 		AllowMethods:     []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
 		ExposeHeaders:    []string{"Content-Length"},
