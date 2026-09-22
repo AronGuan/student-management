@@ -3,6 +3,7 @@ package handler
 import (
 	"github.com/gin-gonic/gin"
 
+	"sms/internal/clock"
 	"sms/internal/config"
 	"sms/internal/middleware"
 	"sms/internal/model"
@@ -43,9 +44,13 @@ func (h *TrialHandler) List(c *gin.Context) {
 		where += " AND t.student_id = ?"
 		args = append(args, studentID)
 	}
-	if v := c.Query("outcome"); v != "" {
+	// Hoisted out of the if so the ORDER BY further down can see it: the
+	// filter and the sort are two halves of one answer, and re-reading the
+	// query string in two places is how they drift apart.
+	outcome := c.Query("outcome")
+	if outcome != "" {
 		where += " AND t.outcome = ?"
-		args = append(args, v)
+		args = append(args, outcome)
 	}
 	// /trials is a consultant's personal work queue, not the student
 	// directory, so it is scoped by role exactly as GET /follow-ups further
@@ -96,7 +101,37 @@ func (h *TrialHandler) List(c *gin.Context) {
 	// WHERE arguments" for the rest of the function, instead of turning into
 	// a mix of filter and paging values that only lines up with one
 	// statement's placeholder order.
-	listArgs := append(append([]interface{}{}, args...), limit, (page-1)*limit)
+	//
+	// The sort key differs by tab. Every tab is "most recent first", but
+	// 待记录结果 is a queue of work and its newest row is not its most urgent
+	// one: it holds trials that have not happened yet (booked one to nine
+	// days out) next to ones that already ran and whose outcome nobody
+	// recorded. Only the second kind is actionable, and under the plain
+	// recency sort it sits at the bottom - past the page boundary, so a
+	// consultant reading page one sees nothing to do. This tab therefore
+	// leads with finished-but-unrecorded rows, and only then by recency.
+	//
+	// Scoped to `outcome=pending` on purpose. The other two tabs are
+	// historical lists where every row has already finished, so the key
+	// would be constant for them - but it would *not* be constant if an
+	// outcome is recorded before the slot arrives, and in those tabs such a
+	// row is simply the newest entry, not the least urgent one.
+	//
+	// The readiness test is `scheduled_at + duration_min <= now` rather than
+	// `scheduled_at <= now`: a 60-minute lesson is not finished when it
+	// starts. COALESCE because the column is nullable in the schema even
+	// though CreateTrial defaults it to 60. `now` is a bind value instead of
+	// SQL NOW(), for the same reason service/trial.go binds clock.Now() -
+	// the clock is injected, and a database-side NOW() would silently answer
+	// in the session's timezone.
+	order := " ORDER BY t.scheduled_at DESC, t.id DESC"
+	orderArgs := []interface{}{}
+	if outcome == "pending" {
+		order = ` ORDER BY (t.scheduled_at + INTERVAL COALESCE(t.duration_min, 60) MINUTE <= ?) DESC, t.scheduled_at DESC, t.id DESC`
+		orderArgs = append(orderArgs, clock.Now())
+	}
+	listArgs := append(append([]interface{}{}, args...), orderArgs...)
+	listArgs = append(listArgs, limit, (page-1)*limit)
 	// t.id DESC is not decoration. scheduled_at is not unique - the seed
 	// writes whole batches at identical wall-clock slots - and under
 	// LIMIT/OFFSET a non-unique sort key makes the pages overlap and miss
@@ -108,8 +143,8 @@ func (h *TrialHandler) List(c *gin.Context) {
 		FROM trials t
 		JOIN students s ON s.id = t.student_id
 		LEFT JOIN subjects sub ON sub.id = t.subject_id
-		LEFT JOIN users u ON u.id = t.teacher_id`+where+`
-		ORDER BY t.scheduled_at DESC, t.id DESC LIMIT ? OFFSET ?`, listArgs...).Scan(&rows).Error; err != nil {
+		LEFT JOIN users u ON u.id = t.teacher_id`+where+order+`
+		LIMIT ? OFFSET ?`, listArgs...).Scan(&rows).Error; err != nil {
 		Fail(c, err)
 		return
 	}
