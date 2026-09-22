@@ -87,8 +87,8 @@ MySQL 8（阿里云 `39.102.63.30:3306`）。
 | Claims | `sub`(user_id) `role`(admin/teacher/student) `name` `sid`(学生账号绑定的 student_id，可为空) `iat` `exp` `jti` |
 | TTL | **Access Token 8 小时**（一个工作日），**MVP 不实现 refresh token**（明确降级，见 ADR-003） |
 | 传递方式 | **双通道**：浏览器走 httpOnly Cookie `ae_token`（SameSite=Lax，生产加 Secure；Vite dev 用 `server.proxy` 把 `/api` 代理到 `127.0.0.1:8080` 保证同源）；curl / Postman 走 `Authorization: Bearer <token>` |
-| CSRF | SameSite=Lax + Origin 白名单中间件 + 写操作强制 `Content-Type: application/json` |
-| Gin 中间件 | `middleware.Authn()` 解析并注入 `c.Set("actor", domain.Actor{ID, Role, StudentID})`；`middleware.RequireRole("admin")`；`middleware.CanWriteStudent()` 从 URL 取 `student_id` → 查 `students.owner_admin_id` → 与 `actor.ID` 比对（R7） |
+| CSRF | `SameSite=Lax` 的 httpOnly Cookie（跨站表单提交带不上凭据）+ CORS 只放行 Vite 两个源（`handler/router.go:39-46`）。**没有独立的 Origin 校验中间件**：跨站读取由 CORS 阻断，跨站写入由 SameSite 阻断 |
+| Gin 中间件 | 只有两个：`middleware.AuthRequired(secret)` 从 httpOnly Cookie 或 `Authorization: Bearer` 取 token，校验后注入 `middleware.CurrentUser{ID, Role, Name}`；`middleware.RequireRoles(...)` 做角色准入。**R7 的归属校验不在中间件链上**——写路径的 URL 参数是 trial / follow_up / lesson 的 id，从它推不出 `student_id`，所以校验落在 service 层，由 `StudentService.AssertOwner`（`service/student.go:18`）逐路径显式调用 |
 | 口令 | bcrypt（`golang.org/x/crypto/bcrypt`），cost 10 |
 
 **为什么双通道**：评分项明说"我们会绕过界面直接测"。curl 能一行带上 Bearer 直接打服务端，是展示"规则在服务端"的最快路径；同时浏览器侧仍走更安全的 httpOnly Cookie。
@@ -180,7 +180,7 @@ MySQL 8（阿里云 `39.102.63.30:3306`）。
                                     │ /api/v1  (同源：Vite proxy 或 Nginx 反代)
 ┌───────────────────────────────────▼──────────────────────────────────────────────┐
 │ Go + Gin                                                                          │
-│  middleware: OriginCheck → Authn(JWT) → RequireRole → CanWriteStudent(R7)          │
+│  middleware: AuthRequired(JWT) → RequireRoles（R7 在 service 层，不在链上）        │
 │  handler  : 只做 解析参数 / 绑定校验 / 调 service / 装响应。不含任何业务规则          │
 │  service  : 【R1-R8 唯一落地处】编排事务、调 repository、调 llm                      │
 │  repository: GORM 常规 CRUD + 关键路径手写 SQL（见 §5/§6）                          │
