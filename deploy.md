@@ -411,7 +411,9 @@ tail -f /opt/ae/.run/frontend.log    # 前端：vite preview 的启动行 + 代�
 
 | 症状 | 病因 | 怎么办 |
 |---|---|---|
-| 启动脚本报 `did NOT answer /healthz within 15s` | 后端起来了又立刻死了 —— 通常是 `DB_DSN` 错、MySQL 不可达、或迁移没跑 | 看 `.run/backend.log` 最后 20 行；`/healthz` 是独立的存活探针 |
+| 日志里出现 `DB_DSN has no database name` | **`DB_DSN` 是空的**（`.env` 没读到或没解析成功）—— 与网络无关。见 §6.4 | `file .env` 查 BOM；核对键名 |
+| `did NOT answer /healthz within 15s`，且日志里 Go 一行都没打、进程还活着 | 卡在连库上（端口被 DROP 会让连接挂住而不是报错）。见 §6.4 末段 | 先跑 §6.4 的可达性检查 |
+| 同上，但日志里有 `db:` / `database bootstrap:` 的其它内容 | 后端起来了又立刻死了 | 看 `.run/backend.log` 最后 20 行 |
 | 打印 `schema is not loaded` 后退出 | 迁移没跑 | `cd backend && ../.run/ae-api -migrate` |
 | 页面能打开但每个接口都 404 或返回 HTML | 前端的 `preview.proxy` 没生效，`/api` 落到了 SPA 回退上（**返回 200 + `index.html`**，看起来像「接口返回了 HTML」而不是「没有代理」） | 确认 `vite.config.ts` 里 `preview` 段有 `proxy`；`frontend.log` 里重启后应能看到代理相关的行 |
 | 浏览器控制台报 CORS，但服务端日志一片空白 | 你在**直连** 19080，而 `CORS_ORIGINS` 里没放行前端地址 | 把 `http://<ecs-ip>:19073` 加进 `CORS_ORIGINS`，重启后端 |
@@ -437,6 +439,61 @@ curl -fsS -X POST http://127.0.0.1:19080/api/v1/auth/login \
 ```bash
 ss -ltnp | grep -E ':(19073|19080)\b'
 ```
+
+### 6.4 `DB_DSN has no database name` —— 它真的意思是「DB_DSN 是空的」
+
+这句话的字面意思在骗人。它来自 `repo.EnsureDatabase` 里 `cfg.DBName == ""` 的分支，而
+**空字符串也会走到这里**：`go-sql-driver` 的 `ParseDSN("")` 返回 `err == nil` 且 `DBName == ""`
+（`dsn.go:472` 的守卫是 `if !foundSlash && len(dsn) > 0`，空串连循环都进不去）。
+⇒ **看到这句话不要去查 DSN 拼写，先查 `DB_DSN` 有没有被读到。**
+
+**为什么文件在、值却是空的**：`godotenv` 只要有**任何一行**解析失败，就**丢弃整份 map**，
+一个变量都不设。而 `PORT` 的代码默认值恰好就是 19080 ⇒「PORT 也没读到」你根本看不出来，
+症状于是表现得像「只有 DB_DSN 坏了」。实测（`godotenv` v1.5.1）：
+
+| `.env` 的形态 | `Load` 返回 | 结果 |
+|---|---|---|
+| 正常（首行注释、CRLF 行尾） | `nil` | 正确 ✓ |
+| **带 UTF-8 BOM** | `unexpected character "禄" in variable name` | **所有变量都没设** |
+| **有一行没有 `=`** | `unexpected character "\n" in variable name` | **所有变量都没设** |
+| 某行引号没闭合 | `nil` | 那一行之后被吞进同一个值，`DB_DSN` 为空 |
+
+**BOM 是最阴的一种**：它在任何编辑器里都不可见，而 Windows PowerShell 5.1 的
+`Set-Content -Encoding utf8` 默认就会写入它。
+
+**一条命令查出来：**
+
+```bash
+file /root/student-management/.env
+head -c 3 /root/student-management/.env | od -An -tx1     # ef bb bf = 有 BOM
+```
+
+`file` 回 `UTF-8 Unicode (with BOM) text` 就是它。去掉：
+
+```bash
+sed -i '1s/^\xEF\xBB\xBF//' /root/student-management/.env
+```
+
+传文件时就要留意来源：`scp` 原文件不会加 BOM，「另存为 UTF-8 with BOM」或 PowerShell 重写会。
+
+**另一种（少见得多）的形态**：日志里 Go 一行都没打、而且**进程还活着**。那才是卡在连接上 ——
+`DB_DSN` 没有 `timeout=` 时连接超时取操作系统默认（TCP SYN 重传，约 127 秒），
+而目标端口若被**丢弃**（DROP）而不是**拒绝**（REJECT），连接就一直挂着。
+
+```bash
+timeout 5 bash -c '</dev/tcp/<db-host>/3306' && echo "3306 reachable" || echo "3306 BLOCKED"
+```
+
+`BLOCKED` ⇒ 去数据库那侧的安全组/白名单加上**这台 ECS 的出口 IP**（`curl -s ifconfig.me` 拿）；
+同 VPC 则改用**内网地址**。授权层面通常不是瓶颈 —— `geo@%` 这种账号在 MySQL 侧本来就连得通。
+
+**想让它以后失败得干脆**，在 `DB_DSN` 里补连接超时：
+
+```dotenv
+DB_DSN="…?charset=utf8mb4&parseTime=true&loc=Australia%2FMelbourne&timeout=5s&readTimeout=30s&writeTimeout=30s"
+```
+
+这样 127 秒的静默挂起会变成 5 秒的明确报错。**`-migrate` 与 `-seed` 走的是同一条连接。**
 
 ---
 

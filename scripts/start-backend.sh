@@ -58,6 +58,23 @@ if wait_http "http://127.0.0.1:$BACKEND_PORT/healthz" 15; then
 fi
 
 echo "[backend] pid $pid did NOT answer /healthz within 15s." >&2
+# "did not answer" alone reads as a crash in both of these cases, and they have
+# completely different causes. The alive-but-silent one is the confusing one: a
+# DB_DSN whose port is DROPPED (rather than refused) makes the connect BLOCK
+# instead of fail, and the go-sql-driver has no connect timeout unless the DSN
+# sets one - so the process sits there with an empty log for ~2 minutes, which
+# looks identical to "the binary didn't run".
+if alive backend; then
+  echo "          The process is STILL RUNNING, so it has not crashed: it is blocked" >&2
+  echo "          before r.Run(). The first network I/O in that window is the database" >&2
+  echo "          (repo.EnsureDatabase), and a dropped SYN hangs rather than errors." >&2
+  echo "          Re-read the log in ~60s - the driver will eventually time out:" >&2
+  echo "            tail -n 40 $(logfile backend)" >&2
+  echo "          Reachability, which takes 5s instead of 2 minutes:" >&2
+  echo "            timeout 5 bash -c '</dev/tcp/<db-host>/3306' && echo ok || echo blocked" >&2
+else
+  echo "          The process is GONE, so it crashed rather than hung." >&2
+fi
 echo "          Last 20 log lines ($(logfile backend)):" >&2
 tail -n 20 "$(logfile backend)" >&2 || true
 exit 1
