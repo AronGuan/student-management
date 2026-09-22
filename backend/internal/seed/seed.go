@@ -26,7 +26,7 @@ var (
 		"Mia", "Luna", "Sophie", "Tina", "Vivian", "Wendy", "Alice", "Bella", "Clara", "Doris"}
 	surnames = []string{"Chen", "Wang", "Liu", "Zhao", "Sun", "Tan", "Xu", "He", "Ding", "Fu",
 		"Guo", "Ma", "Qian", "Yan", "Zhu", "Deng", "Zhou", "Wu", "Lin", "Yang"}
-	subjects  = []string{"Beginner Maths", "AEIS Maths", "AEIS Writing", "English Oral", "Advanced Maths", "Science"}
+	subjects   = []string{"Beginner Maths", "AEIS Maths", "AEIS Writing", "English Oral", "Advanced Maths", "Science"}
 	yearLevels = []string{"Year 3", "Year 4", "Year 5", "Year 6", "Year 7", "Year 8", "Year 9"}
 	sources    = []string{"WeChat referral", "Walk-in", "Google search", "Parent referral", "School flyer"}
 )
@@ -80,20 +80,20 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 
 		// ---- classes: a weekly slot each ----
 		type slot struct {
-			name      string
-			subject   int
-			teacher   int
-			weekday   int // 1=Mon .. 7=Sun
-			start     int
-			capacity  int
-			room      string
+			name     string
+			subject  int
+			teacher  int
+			weekday  int // 1=Mon .. 7=Sun
+			start    int
+			capacity int
+			room     string
 		}
 		slots := []slot{
 			{"Beginner Maths A", 0, 0, 4, 16 * 60, 8, "Room 1"},
 			{"Beginner Maths B", 0, 0, 6, 10 * 60, 8, "Room 1"},
-			{"AEIS Maths A", 1, 1, 4, 17 * 60 + 30, 8, "Room 2"},
-			{"AEIS Writing A", 2, 1, 2, 17 * 60 + 30, 8, "Room 2"},
-			{"English Oral B", 3, 2, 5, 17 * 60 + 30, 6, "Room 3"},
+			{"AEIS Maths A", 1, 1, 4, 17*60 + 30, 8, "Room 2"},
+			{"AEIS Writing A", 2, 1, 2, 17*60 + 30, 8, "Room 2"},
+			{"English Oral B", 3, 2, 5, 17*60 + 30, 6, "Room 3"},
 			{"Advanced Maths A", 4, 3, 3, 18 * 60, 8, "Room 4"},
 			{"Science Intro", 5, 2, 6, 14 * 60, 8, "Lab"},
 			{"AEIS Writing B", 2, 1, 6, 14 * 60, 8, "Room 2"},
@@ -229,10 +229,10 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 			}
 			pkgSize := packageSizeFor(i)
 			p := &model.CreditPackage{
-				StudentID: s.ID,
-				Name:      fmt.Sprintf("%d-credit package", pkgSize),
-				TotalCredits: pkgSize,
-				PriceCents:   int64(pkgSize) * 8500,
+				StudentID:          s.ID,
+				Name:               fmt.Sprintf("%d-credit package", pkgSize),
+				TotalCredits:       pkgSize,
+				PriceCents:         int64(pkgSize) * 8500,
 				PurchasedByAdminID: admins[s.OwnerIdx].ID,
 			}
 			// Purchases are historical, so write them with a backdated
@@ -241,7 +241,7 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 				return err
 			}
 			if err := tx.Exec("UPDATE credit_ledger SET created_at = ? WHERE package_id = ?",
-				now.AddDate(0, 0, -(20 + i%30)), p.ID).Error; err != nil {
+				now.AddDate(0, 0, -(20+i%30)), p.ID).Error; err != nil {
 				return err
 			}
 		}

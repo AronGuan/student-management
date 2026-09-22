@@ -14,16 +14,16 @@ import (
 type AttendanceService struct{}
 
 type Mark struct {
-	StudentID     uint64                 `json:"student_id"`
-	Status        model.AttendanceStatus `json:"status"`
-	Note          string                 `json:"note"`
+	StudentID uint64                 `json:"student_id"`
+	Status    model.AttendanceStatus `json:"status"`
+	Note      string                 `json:"note"`
 	// A flag, not a second text field. The teacher's observation already
 	// went into Note above; this only says "someone else has to pick this
 	// up", and the sentence the family eventually reads is written later
 	// by the consultant (follow_ups.parent_note). Two text fields would be
 	// two copies of one thought, drifting apart the moment either is
 	// edited.
-	NeedsFollowUp bool                   `json:"needs_follow_up"`
+	NeedsFollowUp bool `json:"needs_follow_up"`
 }
 
 // The two strings this file writes into attendances.note with no human

@@ -261,9 +261,9 @@ type Trial struct {
 func (Trial) TableName() string { return "trials" }
 
 type FollowUp struct {
-	ID                uint64     `gorm:"primaryKey;column:id" json:"id"`
-	StudentID         uint64     `gorm:"column:student_id" json:"student_id"`
-	TrialID           *uint64    `gorm:"column:trial_id" json:"trial_id,omitempty"`
+	ID        uint64  `gorm:"primaryKey;column:id" json:"id"`
+	StudentID uint64  `gorm:"column:student_id" json:"student_id"`
+	TrialID   *uint64 `gorm:"column:trial_id" json:"trial_id,omitempty"`
 	// Source says why this row exists, and it is written by whichever path
 	// created the row rather than derived by whoever reads it. Reading
 	// "TrialID == nil means it came from the classroom" would be a
