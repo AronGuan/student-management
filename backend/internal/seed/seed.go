@@ -476,6 +476,149 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 			}
 		}
 
+		// ---- fill the demo consultant's trial board ----
+		//
+		// The two blocks above leave the demo login (mei.lin) with six
+		// trials. That is enough to prove the wires are connected, but not
+		// enough to look like a queue anyone works: 线索与试听 has one tab
+		// per outcome, and a tab holding a single card reads as a broken
+		// filter rather than as a quiet week. So each outcome is topped up
+		// to ten.
+		//
+		// Two things decide which pairs are used:
+		//
+		//  1. R1 is a materialised unique key (uq_trial_once on
+		//     student_id + subject_id), so the pairs must avoid whatever
+		//     the blocks above already claimed. The database is asked
+		//     rather than the arithmetic repeated, because "which pairs
+		//     did those blocks happen to use" is exactly the derivation
+		//     that goes stale the next time one of them is edited.
+		//
+		//  2. Students at index 7 and 9 are skipped, and that is what
+		//     keeps the roster believable afterwards. Index 9 is mei.lin's
+		//     only 'lead' and index 7 her only 'trial' - the two samples
+		//     the students page filters by. Any trial on either one
+		//     replays a lifecycle hop (promoteForTrial: lead -> trial, or
+		//     trial -> active when the outcome is converted), so both
+		//     samples would quietly turn 'active' and the 线索 /
+		//     已约试听 filters would come back empty. The exclusion is
+		//     deliberate, not an oversight.
+		//
+		// The other eleven students are cycled through, each with a
+		// subject cursor that persists across the three outcomes, so one
+		// student's three trials land on three different subjects.
+		const demoPerOutcome = 10
+		demo := []madeStudent{}
+		for i, s := range students {
+			if s.OwnerIdx != 0 || i == 7 || i == 9 {
+				continue
+			}
+			demo = append(demo, s)
+		}
+		taken := map[[2]uint64]bool{}
+		{
+			var used []struct{ StudentID, SubjectID uint64 }
+			if err := tx.Raw("SELECT student_id, subject_id FROM trials").Scan(&used).Error; err != nil {
+				return err
+			}
+			for _, u := range used {
+				taken[[2]uint64{u.StudentID, u.SubjectID}] = true
+			}
+		}
+		subjCursor := make([]int, len(demo))
+		// Tidy wall-clock slots, the same shape the block above uses: the
+		// demo should show 4:00pm, not the minute the seed happened to run.
+		demoSlots := []int{16 * 60, 10 * 60, 17 * 60, 15 * 60, 11 * 60, 14 * 60}
+		demoSeq := 0
+		for oi, outcome := range []string{"lost", "converted", "pending"} {
+			placed := 0
+			for placed < demoPerOutcome {
+				progressed := false
+				for si, st := range demo {
+					if placed == demoPerOutcome {
+						break
+					}
+					// First subject this student has not already tried.
+					ci := -1
+					for subjCursor[si] < len(subjectIDs) {
+						c := subjCursor[si]
+						subjCursor[si]++
+						if !taken[[2]uint64{st.ID, subjectIDs[c]}] {
+							ci = c
+							break
+						}
+					}
+					if ci < 0 {
+						continue // all six subjects used for this student
+					}
+					progressed = true
+					taken[[2]uint64{st.ID, subjectIDs[ci]}] = true
+
+					seq := demoSeq
+					demoSeq++
+					slot := demoSlots[seq%len(demoSlots)]
+					day := now.AddDate(0, 0, 1+seq%9) // pending: 1..9 days out
+					if outcome != "pending" {
+						day = now.AddDate(0, 0, -(3 + seq%12)) // history: 3..14 days back
+					}
+					scheduled := time.Date(day.Year(), day.Month(), day.Day(),
+						slot/60, slot%60, 0, 0, clock.Loc())
+					teacherID := teachers[(si+oi+seq)%len(teachers)].ID
+					// The blocks above store the booking note in outcome_note
+					// (the outcome wording is overwritten straight after the
+					// insert), so this writes that same value once.
+					t := &model.Trial{
+						StudentID: st.ID, SubjectID: subjectIDs[ci], TeacherID: &teacherID,
+						ScheduledAt: scheduled, DurationMin: 60,
+						Outcome:     outcome,
+						OutcomeNote: "Trial booked from " + sources[seq%len(sources)],
+						// Booked two days ahead of the slot, like a real booking.
+						CreatedAt: scheduled.AddDate(0, 0, -2),
+						UpdatedAt: now,
+					}
+					if outcome != "pending" {
+						t.UpdatedAt = scheduled.Add(2 * time.Hour)
+					}
+					if err := tx.Create(t).Error; err != nil {
+						return err
+					}
+					if err := promoteForTrial(tx, now, st.ID, outcome); err != nil {
+						return err
+					}
+
+					// R2: recording an outcome starts the 48h clock, so
+					// every trial carries a follow-up. The historical ones
+					// fall due in the past, i.e. straight into the overdue
+					// queue; every third is closed instead, which gives the
+					// done filter samples while leaving the overdue count
+					// far above the guard in reportStates.
+					dueAt := scheduled.Add(48 * time.Hour)
+					fu := &model.FollowUp{
+						StudentID: st.ID, TrialID: &t.ID, DueAt: dueAt,
+						Status: "pending", CreatedAt: now,
+					}
+					if outcome != "pending" {
+						fu.CreatedAt = scheduled.Add(2 * time.Hour)
+						if seq%3 == 0 {
+							fu.Status = "done"
+							done := dueAt.Add(-3 * time.Hour)
+							fu.CompletedAt = &done
+							fu.CompletedByUserID = &admins[st.OwnerIdx].ID
+							fu.Note = "Called the family; agreed to decide after the weekend."
+						}
+					}
+					if err := tx.Create(fu).Error; err != nil {
+						return err
+					}
+					placed++
+				}
+				if !progressed {
+					return fmt.Errorf("could not place %d %q trials for the demo consultant; "+
+						"its 线索与试听 tabs would stay nearly empty", demoPerOutcome, outcome)
+				}
+			}
+		}
+
 		// ---- one approved leave on a future lesson, so the teacher's
 		// roster shows the prefilled read-only state ----
 		//
