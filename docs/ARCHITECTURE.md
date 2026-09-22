@@ -39,7 +39,7 @@
 
 ### 1.3 数据库
 
-MySQL 8（阿里云 `39.102.63.30:3306`）。
+MySQL 8（阿里云 `<db-host>:3306`）。
 
 **实测结论（team-lead 已连库验证，账号 `geo@%`）**：
 
@@ -274,12 +274,12 @@ take-home/
 | `loc` **只**决定 Go 侧 `time.Time` 的 location，**不改** MySQL 会话 `time_zone` | 驱动 README 原文："this sets the location for time.Time values but does not change MySQL's time_zone setting" |
 | 发送 `time.Time` 参数时，驱动按 `t.In(cfg.loc)` 后格式化成 `'2006-01-02 15:04:05'` 字符串 | 驱动源码 `packets.go` 写入路径（v1.5.0 起即 `t.In(mc.cfg.loc).Format(timeFormat)`） |
 | 读取时 `parseTime=true` 下 DATE/DATETIME/TIMESTAMP 均返回带 `loc` 的 `time.Time` | 驱动行为实测（javorszky 2020 对 v1.5.0 的源码走读） |
-| **实测（team-lead 连库）**：`@@system_time_zone = CST`、`@@global.time_zone = SYSTEM`、`@@session.time_zone = SYSTEM` | 阿里云 39.102.63.30:3306 实测。服务器会话时区是中国标准时 → `NOW()` / `CURDATE()` / `DEFAULT CURRENT_TIMESTAMP` 写进去的值比墨尔本慢 2h（冬令时）或 3h（夏令时），且不报错 |
+| **实测（team-lead 连库）**：`@@system_time_zone = CST`、`@@global.time_zone = SYSTEM`、`@@session.time_zone = SYSTEM` | 阿里云 <db-host>:3306 实测。服务器会话时区是中国标准时 → `NOW()` / `CURDATE()` / `DEFAULT CURRENT_TIMESTAMP` 写进去的值比墨尔本慢 2h（冬令时）或 3h（夏令时），且不报错 |
 
 **落地决策（ADR-007）**：
 
 1. `cmd/server/main.go` 顶部 `import _ "time/tzdata"`。**这是硬要求**，否则在没有 Go 环境的机器上（systemd 部署机 / 面试官电脑）直接启动失败。
-2. DSN：`user:pass@tcp(39.102.63.30:3306)/austin?parseTime=true&loc=Australia%2FMelbourne&charset=utf8mb4&collation=utf8mb4_0900_ai_ci`
+2. DSN：`user:pass@tcp(<db-host>:3306)/austin?parseTime=true&loc=Australia%2FMelbourne&charset=utf8mb4&collation=utf8mb4_0900_ai_ci`
    - `loc=Australia%2FMelbourne`：`/` 必须转义为 `%2F`（驱动 README 明示）。
 3. **不使用 `time_zone` 系统变量参数**。`SET time_zone='Australia/Melbourne'` 要求 MySQL 已加载时区表（`mysql.time_zone_name`），共享实例上常常是空的，会直接报 ERROR 1298。
 4. **硬约束（非建议）**：**SQL 中禁止 `NOW()` / `CURDATE()` / `CURRENT_TIMESTAMP` 参与业务语义**。**实测依据**：`@@system_time_zone = CST`、`@@session.time_zone = SYSTEM`（team-lead 已连库验证），服务器会话时区是中国时间——任何依赖服务器时钟写进去的值都不是墨尔本时间。所有业务时间必须由 Go 侧 `clock.Now()`（`internal/pkg/clock`，内部持有 `melbourneLoc`）显式传参。表的 `created_at` 默认值保留 `DEFAULT CURRENT_TIMESTAMP` 仅供运维审计，**业务代码与任何查询条件都不得读取它**；**`credit_ledger.created_at` 由 Go 显式写入**（它是账务时间，必须准）。

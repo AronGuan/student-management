@@ -17,14 +17,14 @@ Accepted (Phase 1)
 | 发送 `time.Time` 参数时驱动按 `t.In(cfg.loc)` 后格式化为 `'2006-01-02 15:04:05'` | 驱动源码 `packets.go` 写入路径 |
 | 读取时 `parseTime=true` 下 DATE / DATETIME / TIMESTAMP 均返回带 `loc` 的 `time.Time` | 驱动行为实测（v1.5.0 源码走读） |
 | `time_zone` 系统变量需 MySQL 已加载时区表，共享实例常为空，会报 ERROR 1298 | MySQL 时区支持文档 |
-| **实测（team-lead 连库）**：`@@system_time_zone = CST`、`@@global.time_zone = SYSTEM`、`@@session.time_zone = SYSTEM` | 阿里云 39.102.63.30:3306 实测 |
+| **实测（team-lead 连库）**：`@@system_time_zone = CST`、`@@global.time_zone = SYSTEM`、`@@session.time_zone = SYSTEM` | 阿里云 <db-host>:3306 实测 |
 
 ## Decision
 
 1. **`cmd/server/main.go` 顶部必须 `import _ "time/tzdata"`**。硬要求，不是可选优化——否则在没有 Go 环境的机器上启动即失败。
 2. **DSN**：
    ```
-   user:pass@tcp(39.102.63.30:3306)/austin?parseTime=true&loc=Australia%2FMelbourne&charset=utf8mb4&collation=utf8mb4_0900_ai_ci
+   user:pass@tcp(<db-host>:3306)/austin?parseTime=true&loc=Australia%2FMelbourne&charset=utf8mb4&collation=utf8mb4_0900_ai_ci
    ```
 3. **不使用 `time_zone` DSN 参数**（依赖 MySQL 时区表，共享实例不可靠）。
 4. **硬约束（不是建议）—— SQL 中禁止 `NOW()` / `CURDATE()` / `CURRENT_TIMESTAMP` 参与业务语义**。

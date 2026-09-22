@@ -31,7 +31,7 @@ FLUSH PRIVILEGES;
 
 -- 3) 跑迁移（此时用管理账号，DSN 指向 student_management）
 --    migrate -path backend/migrations \
---            -database "mysql://<admin>:<pw>@tcp(39.102.63.30:3306)/student_management" up
+--            -database "mysql://<admin>:<pw>@tcp(<db-host>:3306)/student_management" up
 
 -- 4) 账本收权：credit_ledger 只留 SELECT + INSERT（ADR-008 第一层）
 REVOKE UPDATE, DELETE ON student_management.credit_ledger FROM 'ae_app'@'%';

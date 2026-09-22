@@ -13,7 +13,7 @@ Accepted (Phase 1)
 | MySQL 8.0.16 起 CHECK 约束才真正强制执行；8.0.16 之前**解析但静默忽略** | MySQL 8.0 手册 / caniusesql 兼容性表 |
 | MySQL 可按表授予 `INSERT` 而不授予 `UPDATE` / `DELETE` | MySQL GRANT 语法 |
 | MySQL 唯一索引允许多个 NULL | MySQL 索引语义 |
-| **实测（team-lead 连库）**：`VERSION() = 8.0.46` → CHECK 强制执行成立 | 阿里云 39.102.63.30:3306 |
+| **实测（team-lead 连库）**：`VERSION() = 8.0.46` → CHECK 强制执行成立 | 阿里云 <db-host>:3306 |
 | **实测**：`SHOW GRANTS` 含 `ALL PRIVILEGES ON *.*` + `SUPER` + `CREATE USER` → 可自建专用 app 账号做按表授权 | 同上 |
 
 ## Decision
