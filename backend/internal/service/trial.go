@@ -139,18 +139,26 @@ func (s *TrialService) ListFollowUps(db *gorm.DB, f FollowUpFilter) ([]model.Fol
 		return nil, 0, err
 	}
 	for i := range rows {
-		if rows[i].Status == "pending" {
-			// Same sign convention as /dashboard/admin: positive means
-			// overdue, negative means not yet due. Hours, truncated toward
-			// zero, so "due in 30 minutes" is 0 and "due in 12 hours" is
-			// -12. The front end owns the wording and renders nothing for
-			// <= 0, so a future follow-up falls back to its own SLA
-			// countdown instead of being labelled overdue.
+		if rows[i].Status == "pending" && rows[i].DueAt.Before(now) {
+			// Only rows past their deadline carry a value, and it is never
+			// negative. Pointer plus omitempty then means exactly one
+			// thing: this key is present iff the follow-up is overdue.
 			//
-			// now.Sub(due), NOT due.Sub(now): the two differ only in sign,
-			// and the `?status=pending` filter above selects due_at >= now,
-			// so the wrong order silently made every future row read as
-			// overdue - the opposite of what this field promises.
+			// A signed convention (-12 = "due in 12 hours") was considered
+			// and rejected: the field is called overdue_hours, so a
+			// negative value contradicts its own name, and it would give
+			// this field a wider domain than its documented twin on
+			// /dashboard/admin, which is [0, +inf). Same name, same
+			// meaning, or it is not the same field.
+			//
+			// now.Sub(due), not due.Sub(now): the two differ only in sign,
+			// and getting it backwards would make every overdue row read
+			// as "not due yet" while every future row reads as overdue.
+			//
+			// Truncated toward zero, so a row less than an hour overdue is
+			// 0. The front end treats <= 0 as "no number to show" and
+			// falls back to its own SLA countdown, so nothing ever prints
+			// "overdue 0 hours".
 			hours := int64(now.Sub(rows[i].DueAt).Hours())
 			rows[i].OverdueHours = &hours
 		}

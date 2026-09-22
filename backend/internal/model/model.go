@@ -273,12 +273,15 @@ type FollowUp struct {
 
 	StudentName string `gorm:"->;-:migration" json:"student_name,omitempty"`
 	// OverdueHours is derived at read time so the UI never recomputes the
-	// SLA from a timestamp. Set only while the follow-up is still pending;
-	// a negative value means not yet due, and the front end renders its own
-	// wording, or nothing, for those. Pointer plus omitempty on purpose: a
-	// done follow-up carries no key at all rather than a null. This differs
-	// from handler's followUpRow, which is a non-pointer int because its
-	// queue is pre-filtered - see the comment there.
+	// SLA from a timestamp. Only a still-pending row past its deadline
+	// carries a value (status == "pending" && due_at < now), and it is
+	// never negative; every other row carries no key at all. Pointer plus
+	// omitempty is what makes that "no key" possible - a plain int would
+	// force every future and every done follow-up to serialise a 0, and 0
+	// is a real overdue magnitude ("less than an hour overdue"), not a
+	// synonym for "not overdue". This differs from handler's followUpRow,
+	// which is a non-pointer int because its queue is pre-filtered to
+	// overdue rows only - see the comment there.
 	OverdueHours *int64 `gorm:"->;-:migration" json:"overdue_hours,omitempty"`
 }
 

@@ -1566,7 +1566,7 @@ components:
     FollowUp:
       type: object
       description: |
-        `model.FollowUp`（model.go:265-283），被三处复用：`/follow-ups` 列表、
+        `model.FollowUp`（model.go:265-286），被三处复用：`/follow-ups` 列表、
         `/students/{id}` 的 `follow_ups[]`、`POST /trials/{id}/outcome` 的 `data`。
         **反序列化口径**：带 `omitempty` 的字段在 Go 零值时**整个键缺席**，不是 `null` ——
         因此这些字段**刻意不写 `nullable: true`**（理由同 `TrialRow`）：那会声明一个永不出现的
@@ -1590,18 +1590,23 @@ components:
             服务端**按服务端时钟**算出的逾期小时数，措辞由前端负责（`GET /dashboard/admin` 的
             `FollowUpRow.overdue_hours` 同一口径）。三点必须记住：
 
-            1. **只有 `status=pending` 的行才有值**（`service/trial.go:142-156`）。`model.FollowUp`
-               是 `*int64` + `omitempty`，非 pending 行**整个键缺席** —— 要判的是 `undefined`，
-               **不是 `null`**，故本字段**不写 `nullable: true`**（理由同 `TrialRow`）。
-            2. **符号约定与 `/dashboard/admin` 的 `FollowUpRow.overdue_hours` 完全一致：
-               正值 = 已逾期的小时数，负值 = 距到期还有多少小时。** 两个端点同名同义，
-               前端用一个 `overdueLabel()` 就能同时读对，**不需要按端点分支**。
+            1. **只有「仍是 pending 且已过 `due_at`」的行才有值**
+               （`service/trial.go:141-165`：`status == "pending" && due_at < now`）。
+               `model.FollowUp` 是 `*int64` + `omitempty`，其余所有行**整个键缺席** —— 要判的是
+               `undefined`，**不是 `null`**，故本字段**不写 `nullable: true`**（理由同 `TrialRow`）。
+            2. **键在 ⟺ 已逾期**：有值即已逾期，且**永不为负**，取值域 `[0, +∞)`；`0` 表示
+               「已逾期但不足 1 小时」，不是「未到期」。这与 `/dashboard/admin` 的
+               `FollowUpRow.overdue_hours` 完全一致，前端一个 `overdueLabel()` 就能同时读对，
+               **不需要按端点分支**。之所以不采用「负值 = 距到期还有多少小时」的有符号约定：
+               一是字段名为 `overdue_hours`，负值自相矛盾；二是那会把本字段的值域放宽到
+               `(-∞, +∞)`，比同名孪生字段文档化的 `[0, +∞)` 更宽。**同名同义，否则就不是同一个字段。**
                （`service/trial.go` 用的是 `now.Sub(due_at)`；写成 `due_at.Sub(now)` 会整体反号，
-               `?status=pending` 过滤出的未来行会被前端读成「逾期 N 小时」。）
-               `?status=pending` 拿到的都是 `due_at >= now` 的**未来**行，所以那里通常是**负值**
-               （「还有 12 小时」= `-12`），`0` 表示「不足 1 小时」。
-            3. 前端对 `<= 0` 自行返回空、回落到本地 SLA 倒计时，**服务端不替它兜底** ——
-               这正是本次移除英文串（旧 `overdue_by`，如 `"12h overdue"`）的原因。
+               于是每一条逾期行都会被前端读成「未到期」，而每一条未来行反被读成「已逾期」。）
+            3. 三档过滤下的表现：`?status=pending` 选出的是 `due_at >= now` 的**未来**行，本键
+               **恒缺席**；`?status=overdue` 选出的必然已逾期，本键**恒为正值**；不带 `status`
+               的混合队列则**只**给已逾期的行带上正值，未到期与已完成的行都不带。前端对没有本键
+               的行自行回落到本地 SLA 倒计时，**服务端不替它兜底** —— 这正是本次移除英文串
+               （旧 `overdue_by`，如 `"12h overdue"`）的原因。
 
     Class:
       type: object
@@ -1827,9 +1832,10 @@ components:
       type: object
       description: |
         逾期跟进行。`overdue_hours` 是 SQL 按服务端时钟算出的**逾期小时数**，措辞由前端负责。
-        **符号约定：正值 = 已逾期的小时数，负值 = 距到期还有多少小时** —— 与
-        `GET /follow-ups` 列表里的 `FollowUp.overdue_hours` 完全一致（见该 schema）。
-        本队列**恒不为负**（`>= 0`）：SQL 是 `TIMESTAMPDIFF(HOUR, due_at, now)`（即 `now - due_at`）且
+        口径与 `GET /follow-ups` 列表里的 `FollowUp.overdue_hours` 一致：**两边都只写正数、
+        永不为负**，键在即已逾期（见该 schema：那边靠指针 + `omitempty` 让未逾期行整个键缺席，
+        这边靠队列预过滤，键恒在）。
+        本队列**恒 >= 0**：SQL 是 `TIMESTAMPDIFF(HOUR, due_at, now)`（即 `now - due_at`）且
         已用 `due_at < now` 过滤；逾期不足 1 小时时截断为 `0`。
         **键恒在**（结构体是非指针 `int64` 且无 `omitempty`）：该队列已被 `due_at < now` 过滤，
         字段总有意义。`TIMESTAMPDIFF` 是**截断**的 —— 逾期不足 1 小时会诚实地得到 `0`
