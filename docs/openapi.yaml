@@ -618,7 +618,7 @@ paths:
                   - $ref: '#/components/schemas/ApiResponse'
                   - type: object
                     properties:
-                      # 以运行时为准：`handler/trial.go:83` 直接 `OK(c, fu)`，`data` 就是新建的
+                      # 以运行时为准：handler 的 SetOutcome 直接 `OK(c, fu)`，`data` 就是新建的
                       # FollowUp 本身，**没有** `{ trial, follow_up }` 这层包装（旧草案写错了）。
                       # 前端曾按草案的包装写法做过防御，本轮已按实现删除，
                       # 这里按实现校正，避免契约继续声明一个服务端从不返回的形状。
