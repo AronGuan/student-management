@@ -626,6 +626,7 @@ students 1──N ai_decisions
 - Nginx `location /api/ { proxy_pass http://127.0.0.1:19080; proxy_set_header Host $host; ... }`。**必须反代，不能改成让前端直连 19080**：前端只请求同源的 `/api/v1`，而 `ae_token` 是 httpOnly Cookie，一旦跨源，登录态就断了。
 - Go 编译：`CGO_ENABLED=0 go build -o /opt/ae/ae-api ./cmd/server`，systemd 托管，`Environment=PORT=19080`、`Environment=JWT_SECRET=...`、`Environment=DB_DSN=...`（变量名以 `config/config.go` 为准；env 文件不进仓库）。
 - 换机器就把前端地址写进 `CORS_ORIGINS`（逗号分隔；默认只放行 localhost / 127.0.0.1 的 `19073`）。**这一项不是只给直连调用方用的**：Vite 代理只改写 `Host`（`changeOrigin: true`，`frontend/vite.config.ts:23`），浏览器的 `Origin` 会原样到达后端，于是 `gin-contrib/cors` 里「`Origin` 等于 `Host` 就放行」那条捷径永远不成立，白名单成了必经之路。漏配的表现是 **403 且响应体为空**（cors 中间件走 `AbortWithStatus`，不写 body），服务端日志里只有一行 `| 403 |`。
+  **Nginx 形态要单独判**：那条捷径在「`Host` 与 `Origin` 字面相等」时**会**命中，而 `proxy_set_header Host $host;`（上面 `:626`）里的 `$host` 不含端口 —— 只有当前端跑在默认端口 80 / 443 时两者才相等、CORS 才被跳过；一旦前端在非默认端口（如 `19073`），`Origin` 带端口而 `Host` 不带 ⇒ 又退回必须配白名单。想让两者一定一致，写成 `proxy_set_header Host $http_host;`。⇒ **除了「Nginx + 默认端口」这一种组合，`CORS_ORIGINS` 都是必经之路。**
 
 **两条形状共用的步骤**
 

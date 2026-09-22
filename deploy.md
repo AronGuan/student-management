@@ -636,6 +636,20 @@ sudo nginx -t && sudo systemctl enable --now nginx
 
 前端此时不再需要 Node 常驻，但**首次构建仍然需要**（或者把本机构建好的 `frontend/dist` 传上来）。
 
+> **CORS 判定只看一件事：后端收到的 `Host` 与浏览器 `Origin` 是否字面相等。**
+> `gin-contrib/cors` 里有一条捷径：`Origin` 等于 `"http://"` + `c.Request.Host` 就直接放行
+> （该模块自己的 `config.go:79`，不是本仓的 `config/config.go`）。而上面那行
+> `proxy_set_header Host $host;` 里的 **`$host` 不含端口**，于是：
+>
+> | Nginx 形态 | 后端看到的 `Host` | 与 `Origin` 相等？ | `CORS_ORIGINS` 是不是必经之路 |
+> |---|---|---|---|
+> | 默认端口 80 / 443 | 裸主机名，`Origin` 也不带端口 | 相等 | 被跳过（这一种组合可以不管） |
+> | 非默认端口（例如 `19073`） | 主机名（端口已经丢掉） | 不等（`Origin` 带端口） | **是，必须配** |
+>
+> 想让两者一定一致，就把 Host 换成保留端口的写法：`proxy_set_header Host $http_host;`。
+> 不论哪种形态，配错的代价都一样：**登录 403 且响应体为空**（cors 中间件走 `AbortWithStatus`，不写 body），
+> 服务端日志里只有一行 `| 403 |`，从浏览器看像「登录坏了」。
+
 ### 8.4 让后端只听 127.0.0.1（可选）
 
 现在 `main.go:83` 是 `addr := ":" + cfg.Port`，等于绑所有网卡，安全性靠安全组。
