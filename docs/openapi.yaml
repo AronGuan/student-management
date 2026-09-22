@@ -62,7 +62,8 @@ info:
     | `POST /auth/login` `POST /auth/logout` `GET /auth/me` `GET /config` | 是 | 是 | 是 | 登录态 |
     | `GET /students` | 是 | 是 | **403** | household 不走列表，走 `/dashboard/household` |
     | `POST /students` `PATCH /students/{id}` `POST /students/{id}/transfer-owner` | 是 | **403** | **403** | 写路径仅 admin（R7） |
-    | `GET /students/{id}` `GET /students/{id}/credits` `GET /students/{id}/ai-cards` | 是 | 是 | 是（**仅自己孩子**，越界 40301） | 数据范围内收敛 |
+    | `GET /students/{id}` `GET /students/{id}/credits` | 是 | 是 | 是（**仅自己孩子**，越界 40301） | 数据范围内收敛；`/students/{id}` 另按字段裁剪，见 `StudentDetail` |
+    | `GET /students/{id}/ai-cards` | 是 | 是 | **403**（40300） | 决策卡是「机构对家庭的商业判断」，与 `/students/{id}` 裁掉的 `latest_ai_card` 同口径，不发给 household |
     | `POST /students/{id}/credit-packages` `POST /students/{id}/credit-adjustments` | 是 | **403** | **403** | 动钱的路径仅 admin |
     | `GET /trials` | 是（**仅自己名下学生的试听**） | 是（**仅自己任课的试听**） | **403** | 队列按归属收敛，口径同 `GET /follow-ups`（见该端点说明） |
     | `POST /trials` `POST /trials/{id}/outcome` `GET /follow-ups` `POST /follow-ups/{id}/complete` | 是（**且受 R7**：只可操作自己名下学生的记录，否则 40301） | **403** | **403** | 写路径仅 admin（R7）；`GET /follow-ups` 亦按 owner 收敛 |
@@ -223,7 +224,7 @@ paths:
       tags: [students]
       summary: 学生列表
       description: |
-        可见范围：admin 读全量；teacher 读自己教的班的学生。
+        可见范围：admin 读**全部顾问**的学生；teacher 读自己教的班的学生。
         **household(role=student) 不能调用本端点 → `403 / 40300`**（router.go:62 的 RequireRoles 只含
         admin 与 teacher）—— 家长端不走学生列表，走 `GET /dashboard/household`。
         **空集合契约**：无匹配时 `data.items` 恒为 `[]`，**绝不返回 `null`**（客户端 `.map()` 不得因空集合崩溃）。
@@ -232,6 +233,20 @@ paths:
         - { $ref: '#/components/parameters/Limit' }
         - name: status
           in: query
+          description: |
+            显式传值时**总是优先**，这是承重的：`/leads` 的线索档就靠 `?status=lead` 取数
+            （`LeadsPage.tsx:152`），默认值不得覆盖调用方的意图。
+
+            **不传**时按「学生目录」的定义收口到 `active` + `churned`
+            （`service/student.go` 的 `List`）：`lead` / `trial` 从未开过账，本页要展示的
+            每一列（余额、在读班级数、续费时点）对他们都读为空，所以这两个阶段不在学生
+            目录里，而在 `/leads` —— 线索档看 source 与晾置天数，试听档看结果徽标，那两张
+            表的列是按他们设计的。`churned` 保留：那些家庭买过课，账本仍在，「谁离开了」
+            只有这一页能回答。
+
+            实测（seed 数据，`owner_admin_id=me`）：被排掉的是 3 条 `lead` + 1 条 `trial`，
+            与 `/leads` 线索档的 3 行、以及试听档里那名刻意没约过试听的 `trial` 学生
+            一一对应。
           schema: { $ref: '#/components/schemas/StudentStatus' }
         - name: q
           in: query
@@ -317,7 +332,9 @@ paths:
       tags: [students]
       summary: 学生详情（档案 + 余额 + 在班 + 待跟进 + 最新 AI 卡）
       description: |
-        读作用域：admin 读全量；teacher 读自己教的班的学生；**household(role=student) 只读自己的孩子，读别家孩子返回 403**（与 `/students/{id}/ai-cards` 一致）。
+        读作用域：admin 读全量；teacher 读自己教的班的学生；**household(role=student) 只读自己的孩子，读别家孩子返回 403**。
+        注意这与 `/students/{id}/ai-cards` **不再一致**：该端点自本轮起仅 staff 可读（见其说明），
+        本端点仍对 household 开放，但按角色裁掉内部字段（见 `StudentDetail`）。
       responses:
         '200':
           description: OK
@@ -501,8 +518,9 @@ paths:
         的试听。两条谓词都拼进 SQL，**不留给客户端过滤**（否则"过滤失效 = 全量泄露"）。
 
         **为什么不与 R7 冲突**：R7 管的是**学生目录**（`DESIGN.md:116`：admin 可读全部学生、
-        只可写 `owner_admin_id = self` 的），`GET /students` 至今仍全量返回并逐行带 `can_write`
-        标记，那条读全量的能力没有被削弱。本端点是「今天我桌上有什么」，与同页、同角色门、
+        只可写 `owner_admin_id = self` 的），`GET /students` 仍不按 owner 收口并逐行带 `can_write`
+        标记，那条「读全部学生」的能力没有被削弱（它只按 status 收口到已成交的人，见该端点
+        `status` 参数的说明）。本端点是「今天我桌上有什么」，与同页、同角色门、
         同一文件的 `GET /follow-ups` 完全同口径 —— 把整家公司的名单铺到某个顾问的工作台上
         不是权限，而是噪音，用户实际反馈过这个 bug。历史上这里没有过滤，前端因此绕行改读
         `/dashboard/admin`（`frontend/src/pages/TodayPage.tsx:9-13` 的注释记录了那次绕行），
@@ -519,6 +537,16 @@ paths:
         seed 会成批写入同一挂钟时刻），因此翻页既不会漏行也不会重复行：把第 1 页与第 2 页的
         `items[].id` 并起来去重，行数**恰好等于 `total`** —— 这也是手工验证清单里的验收断言。
         此前本端点没有分页参数，尾部硬编码 `LIMIT 100`，超过 100 条会**静默截断**且调用方无从得知。
+
+        **排序随 `outcome` 分档**。三档都是「最近的在前」，但 `outcome=pending`（待记录结果）
+        额外多一个前置键：`(scheduled_at + COALESCE(duration_min,60) MINUTE) <= now` 的行排在
+        前面，之后才按 `scheduled_at DESC`。原因是这一档同时装着两种东西 —— **还没上过的课**
+        （seed 铺到 `now + 1..9` 天）和**已经上完但没人记结果**的课，而后者才是顾问今天要处理的。
+        纯按时间倒序时它们沉在列表末尾、多数落在下一页之外，第 1 页读起来「今天没事干」。
+        分档只在 `pending` 下生效：另两档是历史列表，每行都已结束 —— 但若有人在开课前就记了
+        结果，那个键在那两档里不是常量，而那一行只是「最新的一条」，不是「最不紧急的一条」。
+        判据用「开始 + 时长」而非「开始」，因为 60 分钟的课在开课那一刻并没有结束。
+        排序键仍以唯一键 `t.id DESC` 收尾，所以上一条翻页断言不受影响。
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/Limit' }
@@ -531,6 +559,11 @@ paths:
           schema: { type: integer, format: int64 }
         - name: outcome
           in: query
+          description: |
+            按试听结果过滤。`pending` 就是页面上的「待记录结果」档 —— 注意它**同时装着两种
+            东西**：还没上过的课，和已经上完但没人记结果的课（服务端把后者排在最前，见上）。
+            所以这一档**不等于**「结果填漏了的那些」，取名时不要按后者去理解。
+            `converted` / `lost` 是历史列表，都是已经结束的课。
           schema: { type: string, enum: [pending, converted, lost] }
       responses:
         '200':
@@ -1047,11 +1080,16 @@ paths:
           application/json:
             schema:
               type: object
-              required: [records]
+              required: [marks]
               properties:
-                records:
+                marks:
                   type: array
                   items: { $ref: '#/components/schemas/AttendanceRecordInput' }
+                  description: |
+                    字段名是 `marks`，**不是** `records` —— 本文档此前写错了，实现与前端一直是
+                    `marks`（`handler/scheduling.go:359` 的 `json:"marks"`、`Roster.tsx` 的
+                    `api.post(..., { marks })`）。契约是给对面用的说明书，写成一个双方都不发的
+                    键名比不写更糟：照着文档写出来的客户端会得到 400，而文档看起来没问题。
       responses:
         '200':
           description: 已结算
@@ -1065,10 +1103,15 @@ paths:
                       data:
                         type: object
                         properties:
-                          deducted: { type: integer, description: "本次实际扣减的课时总数" }
-                          items:
-                            type: array
-                            items: { $ref: '#/components/schemas/Attendance' }
+                          charged:
+                            type: integer
+                            description: |
+                              本次**实际**扣减的课时总数（`handler/scheduling.go:371` 的
+                              `gin.H{"charged": charged}`）。此前文档写的是 `deducted` —— 同样
+                              是照着文档写客户端就会读空的漂移，已按运行时校正。
+                              幂等重放时这一行是**本次新增**的扣减数，不是这节课的总数：第二次
+                              提交同一批学生全部命中 `continue`，因此返回 `0`，而不是把已经扣过的
+                              课时再报一遍。前端据此提示的文案因此要读「本次扣 N」，不能读「本班扣 N」。
         '409':
           description: "code=40906 重复结算（幂等命中）"
           content:
@@ -1224,8 +1267,12 @@ paths:
       summary: 历史决策卡（含 ai_status）
       description: |
         路径参数是 **student id**，不是 card id —— 卡片按学生归属（handler/ai.go:22）。
-        读作用域与 `/students/{id}` 完全相同（`AssertReadable`，ai.go:70）：staff 可读任意
-        学生，household 只读自己的孩子，读别家孩子的卡片返回 403。
+        **仅 staff（admin / teacher）可读**，路由级 `RequireRoles` 拦截，household 一律 403（40300）。
+        这点与 `/students/{id}` 有意不同：那里 household 可读自己的孩子，但被裁掉了
+        `latest_ai_card`（见 `StudentDetail`）。决策卡是机构对家庭的商业判断 —— `churn_risk`、
+        顾问建议的动作，以及会**逐字引用老师内部备注**的 `evidence` —— 若本端点仍对 household
+        开放，那份裁剪就等于没做：同一个对象从第二个门原样递了出去。
+        `AssertReadable`（ai.go:70）保留在 handler 内，对 staff 继续生效。
         响应形态是 `data: {items: [...]}` —— **不是裸数组**，与 `OK(c, gin.H{"items": ...})`
         （ai.go:79）一致。`items` 恒为数组，无卡片时是 `[]` 而不是 null。
       parameters:
@@ -1257,7 +1304,7 @@ paths:
                             default: []
                             items: { $ref: '#/components/schemas/AiDecisionCard' }
         '403':
-          description: "code=40301：household 读别家孩子的卡片（与 /students/{id} 同作用域）"
+          description: "code=40300：household 一律不可读（此端点 staff-only，路由级 RequireRoles）"
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiErrorBody' }
@@ -1266,9 +1313,9 @@ paths:
   /dashboard/admin:
     get:
       tags: [dashboard]
-      summary: "admin 首屏：三条行动队列 + 头部计数（不是学生列表）"
+      summary: "admin 首屏：五条行动队列 + 头部计数（不是学生列表）"
       description: |
-        设计意图（见 `handler/dashboard.go:61-63`）：admin 的失效模式是**忘了动手**，不是找不到人。
+        设计意图（见 `handler/dashboard.go:68-72`）：admin 的失效模式是**忘了动手**，不是找不到人。
         所以首屏是"现在该做什么"的行动队列，而不是一张需要自己拼凑的学生表。
         作用域：全部按 `s.owner_admin_id = 当前 admin` 收敛，只含自己的学生。
         `overdue_hours` / `due_at` 由 SQL **按服务端时钟**算出：服务端只下发逾期**小时数**，
@@ -1291,7 +1338,7 @@ paths:
       tags: [dashboard]
       summary: "老师首屏：今日课表 + 待补点名（富行，不点进去就能回答三个问题）"
       description: |
-        设计意图（见 `handler/dashboard.go:148-149`）：老师不打任何东西就能回答
+        设计意图（见 `handler/dashboard.go:204-205`）：老师不打任何东西就能回答
         「下一节是什么 / 谁是新面孔 / 谁请假了」。因此每行自带 `students` / `new_faces` /
         `on_leave` / `recorded` 四个计数，而不是让前端为每节课再发一次请求（N+1）。
         `start_clock` 由服务端从 `start_min` 格式化，前端不重复实现分钟到时钟的换算。
@@ -1313,12 +1360,12 @@ paths:
       tags: [dashboard]
       summary: "家长/学生首屏：本家庭凭证名下的孩子及各自余额"
       description: |
-        设计意图（见 `handler/dashboard.go:181-183`）：家长端存在的唯一理由是回答
+        设计意图（见 `handler/dashboard.go:237-239`）：家长端存在的唯一理由是回答
         「我的课时怎么没了」。所以首屏第一屏就给出每个孩子的当前余额与在读状态，
         再由此进入逐条流水的 `/students/{id}/credits`。
         作用域：仅 `students.user_id = 当前登录用户`，一个家庭凭证可带多个孩子（兄弟姐妹）。
         响应形态是 `data: {students: [...]}` —— **不是裸数组**，与
-        `OK(c, gin.H{"students": ...})`（dashboard.go:199）一致；`students` 恒为数组，
+        `OK(c, gin.H{"students": ...})`（dashboard.go:255）一致；`students` 恒为数组，
         无绑定时为 `[]` 而非 null。
       responses:
         '200':
@@ -1557,6 +1604,14 @@ components:
       allOf:
         - $ref: '#/components/schemas/Student'
         - type: object
+          description: |
+            注意：**同一份 schema 对两类凭据返回两种可见范围。** 员工（admin / teacher）拿到完整字段；
+            household 凭据虽然可以读自己孩子的记录，但服务端在 `handler/student.go` 的 `Get` 里
+            按角色把**内部那一半**置空后才下发 —— `recent_feedback` 与 `follow_ups` 返回 `[]`，
+            `latest_ai_card` 返回 `null`。留下的 `parent_updates` 才是真正给家庭的那一份。
+            之所以在服务端裁而不是靠前端不渲染，是因为**不渲染不是边界**：拿到 token 的人可以直接读 JSON。
+            裁剪范围只限「同事之间的原话」和「机构自己的推理」；`guardians` / `packages` /
+            `enrollments` / `balance` / `owner_admin_id` 家长本来就该看到，不做裁剪。
           properties:
             balance: { type: integer }
             guardians:
@@ -1570,11 +1625,77 @@ components:
               items: { $ref: '#/components/schemas/CreditPackage' }
             follow_ups:
               type: array
-              items: { $ref: '#/components/schemas/FollowUp' }
+              description: |
+                同一个学生的跟进记录（`service.FollowUpRow`，`student_detail.go:66-85`），按
+                `created_at` 倒序。与 `recent_feedback` / `parent_updates` 是三份**并排的数据**：
+                这一支是顾问自己那一半（他打算怎么处理、处理到哪一步）。
+                也受角色裁剪：家庭凭据恒得到 `[]`（见上方 description）。
+
+                items 指向 `StudentFollowUpRow` 而**不是** `FollowUp`。抽屉的投影比那份 schema 窄，
+                **这是设计不是遗漏** —— 详见新 schema 的说明。此前的指向是错的：它声明了一个
+                这个端点从不发出的形状。
+              items: { $ref: '#/components/schemas/StudentFollowUpRow' }
+            recent_feedback:
+              type: array
+              description: |
+                老师本人写下的课堂评价，**按 `recorded_at` 倒序，最多 10 条**。
+                它取的是 `attendances.note`，但只返回**人写的部分**：服务端用
+                `service.teacherFeedback()` 把两处系统样板剥掉后才下发 —— 迟到请假时
+                系统写的 `late leave: notice < 24h`，以及考勤纠错时追加的
+                `corrected from <旧状态>` 后缀（纠错会把它接在老师原话之后，也可能
+                独自落在列里）。被剥离后为空的行**整行丢弃**，所以返回条数可能不足 10
+                —— 这是有意的：十行样板不如三行老师真写过的话。同一列也被 AI 续费卡
+                读取，两侧共用同一套清洗规则，不会出现两种读法。
+              items: { $ref: '#/components/schemas/FeedbackRow' }
+            parent_updates:
+              type: array
+              description: |
+                顾问写给这个家庭、家长在 `/me` 上真能读到的那句话，**按 `parent_note_at` 倒序、最多 10 条**。
+                与 `recent_feedback` 是两份不同的数据，不是一份数据的两个视图：那一份出自点名页备注列，
+                是老师写给同事的课堂记录；这一份出自 `follow_ups.parent_note`，是顾问处理完一次跟进后
+                亲手写给家长的话。两者之间**没有派生关系** —— 不做自动脱敏、不做自动摘要，因为
+                「忘了跟家长说」（行存在但 `parent_note` 为 NULL）和「没什么可跟家长说」（行不存在）
+                必须能区分开。服务端只下发 `parent_note` 非空的行，所以这里**必然非空**；
+                没有可展示内容时是空数组 `[]`，不是 `null`（与其他集合同一口径）。
+              items: { $ref: '#/components/schemas/ParentUpdateRow' }
             latest_ai_card:
               allOf:
                 - $ref: '#/components/schemas/AiDecisionCard'
               nullable: true
+
+    FeedbackRow:
+      type: object
+      description: |
+        一条老师课堂评价，连同它所属的课次。`note` 是**已清洗过的**老师原话
+        （见 `StudentDetail.recent_feedback`）：系统生成的 `late leave:` /
+        `corrected from` 文本不会出现在这里。字段恒在。
+      properties:
+        id: { type: integer, format: int64, description: "attendances.id" }
+        lesson_date: { type: string, example: "2026-09-16", description: "lessons.lesson_date，YYYY-MM-DD" }
+        class_name: { type: string }
+        subject_name: { type: string, description: "无科目时为空串，非 null" }
+        teacher_name: { type: string, description: "users.display_name；无老师时为空串，非 null" }
+        status:
+          type: string
+          enum: [present, late, absent, leave_approved, leave_late]
+          description: "该次考勤的状态。写备注的行通常是 present/late，但枚举保留完整取值"
+        note: { type: string, description: "老师原话，已剥掉系统文本" }
+        recorded_at: { type: string, format: date-time }
+
+    ParentUpdateRow:
+      type: object
+      description: |
+        一条**给家长的告知**，连同说话的人。取 `follow_ups.parent_note`，不是 `attendances.note`：
+        同一个事件的两面 —— 老师那面是 `recent_feedback`（内部），顾问这面是这里（对客户的正式陈述）。
+        `note` **恒非空**（服务端已按 `parent_note IS NOT NULL AND parent_note <> ''` 过滤），
+        `speaker_name` 可能为空串（`parent_note_by_user_id` 指向的用户被删或为空时），
+        所以客户端回退要用 `|| '课程顾问'`，**不能用 `??`** —— `??` 兜不住空串。
+        四个字段恒在，没有 omitempty。
+      properties:
+        id: { type: integer, format: int64, description: "follow_ups.id" }
+        note: { type: string, description: "顾问写给家长的原话，服务端保证非空" }
+        speaker_name: { type: string, description: "users.display_name；可能为空串，非 null" }
+        recorded_at: { type: string, format: date-time, description: "follow_ups.parent_note_at，排序依据" }
 
     CreateStudentRequest:
       type: object
@@ -1708,7 +1829,24 @@ components:
         student_id: { type: integer, format: int64 }
         student_name: { type: string, description: "omitempty：无值时键缺席（undefined），非 null" }
         trial_id: { type: integer, format: int64, description: "omitempty 指针：为 NULL 时键缺席（undefined），非 null" }
-        due_at: { type: string, format: date-time, description: "试听标记结果时写入 now+48h（R2）；无 omitempty，恒在" }
+        source:
+          type: string
+          enum: [trial, teacher_note]
+          description: |
+            这条跟进**为什么存在**。由**创建它的那条路径显式写下**，不由 `trial_id` 是否为空
+            推出来 —— 不让读的人去推断「`trial_id` 缺席 ⇒ 课堂来的」，是因为那是一个
+            「有符号、无守卫」的约定：第三种来源出现时它会静默失效，而没有任何约束、索引或
+            测试会报错，只是从某一天起所有新行都被读成课堂来的。列上是一个 ENUM，写错值写不进去。
+
+            `trial` = 记录试听结果时自动开的 48h 跟进（R2）；
+            `teacher_note` = 老师在点名页勾了「需要顾问跟进」（见 `AttendanceRecordInput.needs_follow_up`）。
+
+            无 omitempty，恒在：列是 `NOT NULL DEFAULT 'trial'`，迁移把 `000004` 之前的所有行
+            回填成 `trial` —— 那些行确实全部出自试听路径，所以这个默认值不是将就，是当时的事实。
+            两个来源按本字段**恰好切分**「未完成的跟进」：`/dashboard/admin` 的
+            `overdue_follow_ups` 只看 `trial`，`flagged_follow_ups` 只看 `teacher_note`，
+            合起来不重不漏。
+        due_at: { type: string, format: date-time, description: "两条路径都写入 now + FOLLOWUP_SLA_HOURS（R2 与课堂标记共用同一个阈值来源 config.Thresholds.FollowUpSLAHours，不各自硬编码 48）；无 omitempty，恒在" }
         status: { type: string, enum: [pending, done, overdue] }
         completed_at: { type: string, format: date-time, description: "omitempty 指针：未完成时键缺席（undefined），非 null" }
         completed_by_user_id: { type: integer, format: int64, description: "omitempty 指针：未完成时键缺席（undefined），非 null" }
@@ -1824,6 +1962,11 @@ components:
           enum: [prefilled, teacher_override, system]
           nullable: true
         balance: { type: integer }
+        note:
+          type: string
+          nullable: true
+          maxLength: 255
+          description: "老师填的自由备注（attendances.note）。未点名时为 null；纠错会以 ' | corrected from <旧状态>' 追加在原备注之后，故读到的值可能长于老师当初输入的内容"
 
     Roster:
       type: object
@@ -1855,6 +1998,37 @@ components:
           enum: [present, late, absent]
           description: "老师只能提交这三种；leave_approved / leave_late 由系统按 24h 阈值预填并只读"
         note: { type: string, maxLength: 255 }
+        needs_follow_up:
+          type: boolean
+          default: false
+          description: |
+            「需要顾问跟进」—— 老师在这一行上打的勾，不是一个输入框。
+
+            为什么不给老师第二段话：这一列只有**一支笔**，写的人是在课堂上的老师；
+            家长读到的那段话由顾问消化后另行写下（`follow_ups.parent_note`），两者互不派生
+            （见 `POST /follow-ups/{id}/complete`）。老师的职责只是把「这件事需要有人接手」
+            推出去，所以这里要的是一个**动作**而不是一段文字。
+
+            服务端在同一次结算事务里为这一行插一条 `follow_ups`：
+            `source='teacher_note'`、`trial_id=NULL`、`due_at = now + FOLLOWUP_SLA_HOURS`、
+            `status='pending'`、`note=NULL`（`note` 是顾问完成时写的处理说明，不是老师的原话；
+            老师的原话已经在 `attendances.note` 里，抄第二份只会让两处各自漂移）。
+
+            两条必须成立的不变量：
+            1. **只有本次真正新建出出勤行的那一行才会开跟进。** 重放同一次结算时整行被幂等
+               跳过（`Settle` 的 `existingID != 0 → continue` 分支），跟进也不会重复生成 ——
+               勾两次不会得到两条待办。
+            2. `needs_follow_up` **不构成为什么这一行会被拒绝**。状态本身不合法（请假两态、
+               或任何非 present/late/absent）仍然照 R4 以 422 拒绝整次请求，与这个键无关。
+            3. **这个勾只能撤回一个请求，撤不回一件事实。** 提交之后备注列转只读（纠错走 PATCH，
+               而 PATCH 不接受 `needs_follow_up`），所以老师把勾取消掉**不会**撤销已经开出的那条待办。
+               这是有意的：`follow_ups` 是顾问名下的一张工单，一旦存在就有了自己的生命周期
+               —— 顾问可能已经把电话打完了。老师撤回请求、与顾问关掉工单，是两件事；
+               后者走 `POST /follow-ups/{id}/complete`（关闭，不是删除）。
+            4. **非空 `note` 不是服务端不变量，是客户端的一条规则。** 界面上旗标只在那一行
+               真的写了课堂记录时才出现（没有内容就没有要接手的东西）；但服务端**不**因为它为空
+               而拒绝。值得记录的事实只有「老师标记了这一行」，把它当成错误会让一个本来能落库的
+               事实变成一个 400 —— 而一个 400 不会让老师补写那句话，只会让这次点名白点。
 
     LeaveRequest:
       type: object
@@ -1933,19 +2107,65 @@ components:
     AdminDashboard:
       type: object
       description: |
-        三条行动队列是产品主张，三个计数是队列表达不了的头部数字。
+        五条行动队列是产品主张，五个计数是队列表达不了的头部数字。
         **注意 `today_lessons` 是整数计数，不是数组**（与首版规格的数组语义不同）——
         点开今日课表请走 `GET /lessons?date=...`。
+        `upcoming_trials` 与 `awaiting_outcome_trials` 是同一条时间轴的两段，**互不重叠**：
+        前者是「还没开始」（`scheduled_at >= now`），后者是「已经上完但结果没记」
+        （`scheduled_at + COALESCE(duration_min,60) <= now` 且 `outcome='pending'`）。
+        正在进行中的那一段（已开始、未结束）两边都不收 —— 那段时间顾问本来就无事可做，
+        因为结果只有在课上完之后才谈得上。
+
+        两条跟进队列按 `source` **恰好切分**「未完成的跟进」：`overdue_follow_ups` 只看 `trial`，
+        `flagged_follow_ups` 只看 `teacher_note`，合起来不重不漏。
+
+        两条跟进队列都**不下发已软删学生的行**（`s.deleted_at IS NULL`）：那些行上的
+        「标记为已跟进」必然 404（`service/trial.go` 的 `CompleteFollowUp` 走 `AssertOwner`，
+        它带 `deleted_at IS NULL`），把一个点不动的任务摆给顾问比不摆更糟 —— 这是本仓库
+        反复写过的同一句判词。数组与它对应的计数**用同一个谓词**，否则页头说 5 条、列表画 3 条，
+        而看的人只会以为列表漏了。
       properties:
         overdue_follow_ups:
           type: array
           default: []
-          description: "逾期跟进队列（超过 48h SLA 未跟进），按 due_at 升序，上限 20（R2）"
+          description: |
+            逾期跟进队列（超过 48h SLA 未跟进），按 due_at 升序，上限 20（R2）。
+            **只看 `source='trial'`** —— 课堂记录标记那条线由 `flagged_follow_ups` 承担，
+            两个队列按 `source` 恰好切分「未完成的跟进」，不重不漏。之所以要显式切分而不是
+            「反正现在逾期的都是试听来的」：那是靠数据现状成立的说法，不是靠约束成立的说法，
+            课堂标记一旦逾期就会同时出现在两区里，而写这条 SQL 的人当时并不知道。
           items: { $ref: '#/components/schemas/FollowUpRow' }
+        flagged_follow_ups:
+          type: array
+          default: []
+          description: |
+            「课堂记录标记」—— 老师在点名页勾了「需要顾问跟进」而顾问还没处理完的项，
+            按 due_at 升序，上限 20。
+
+            与 `overdue_follow_ups` 的三点不同，都是刻意的：
+            1. **不按是否逾期过滤**（`status='pending' AND source='teacher_note'` 全部）。
+               逾期的行**留在这里**而不是甩进逾期区：逾期区按 source 只收试听转化，而且它当前
+               在界面上是隐藏的（用户裁定），甩过去等于让这一条任务凭空消失。
+            2. **行里没有 `overdue_hours`**，见 `FlaggedFollowUpRow`。
+            3. 展示的措辞由前端从 `due_at` 做本地倒计时，服务端不替它算差值。
+          items: { $ref: '#/components/schemas/FlaggedFollowUpRow' }
         upcoming_trials:
           type: array
           default: []
-          description: "未来待上/待反馈的试听，按 scheduled_at 升序，上限 10"
+          description: "未来待上/待反馈的试听（尚未开始），按 scheduled_at 升序，上限 10"
+          items: { $ref: '#/components/schemas/TrialRow' }
+        awaiting_outcome_trials:
+          type: array
+          default: []
+          description: |
+            已上完、但结果还没记录的试听：`outcome='pending'` 且
+            `scheduled_at + COALESCE(duration_min,60) <= now`。按**结束时刻升序**
+            —— 结束最久的排最前，上限 20。
+            这些是全系统里唯一「顾问此刻就能操作」的试听：记录结果同时在同一事务里
+            启动 48h 跟进时钟（R2）。
+            排序方向与 `GET /trials?outcome=pending` **刻意相反**，两处不是笔误：
+            那边是档位浏览，刚下课的最该马上打电话，所以最新的在前；这边是积压兜底，
+            越久没记的行越该先救，所以最旧的在前。
           items: { $ref: '#/components/schemas/TrialRow' }
         low_credit:
           type: array
@@ -1956,8 +2176,21 @@ components:
           type: integer
           description: "今日与自己学生相关的课次**数量**（计数，非数组）"
         pending_followups: { type: integer, description: "待跟进总数（含未逾期）" }
-        overdue_followups: { type: integer, description: "逾期跟进总数（与 overdue_follow_ups.size 可能不等：后者上限 20）" }
+        overdue_followups: { type: integer, description: "逾期跟进总数（`source='trial'`；与 overdue_follow_ups.size 可能不等：后者上限 20）" }
+        flagged_followups:
+          type: integer
+          description: |
+            「课堂记录标记」未处理总数（`source='teacher_note' AND status='pending'`，含已逾期；
+            与 `flagged_follow_ups.size` 可能不等：后者上限 20）。计数与数组用同一个谓词，
+            否则页头说 5 条、列表只画 3 条，而看的人只会以为列表漏了。
         low_credit_students: { type: integer, description: "低课时学生总数（与 low_credit.size 可能不等）" }
+        awaiting_outcome_trials_count:
+          type: integer
+          description: |
+            「已上完待记录」总数（与 `awaiting_outcome_trials.size` 可能不等：后者上限 20）。
+            名字带 `_count` 后缀而没有照抄兄弟字段的省略式（`overdue_followups` /
+            `low_credit_students`）：这一对的数组名与计数名无法靠「去掉下划线」区分，
+            硬凑会得到两个含义刚好相反的键名，那比不一致更糟。
 
     FollowUpRow:
       type: object
@@ -1978,15 +2211,89 @@ components:
         due_at: { type: string, format: date-time }
         overdue_hours: { type: integer, format: int64, example: 26 }
 
+    FlaggedFollowUpRow:
+      type: object
+      description: |
+        「课堂记录标记」队列的一行（`/dashboard/admin` 的 `flagged_follow_ups`）。
+
+        与 `FollowUpRow` 只差一个字段，却是**必须分开的两个类型**，不是重复定义：
+        `FollowUpRow.overdue_hours` 的文档明写「`0` 表示已逾期但不足 1 小时**而不是**未到期」。
+        而本队列的行按定义**还没到期**（`due_at = 标记时刻 + 48h`），若复用同一个类型，服务端
+        只能给出一个 `0` 或一个负数：前者与那句文档正面冲突（「没到期」被渲染成「已逾期 0 小时」），
+        后者会把这个字段的值域从 `[0, +∞)` 放宽到 `(-∞, +∞)`，而它和 `FollowUp.overdue_hours`
+        是**同名**的。所以这里干脆不带这个字段：前端拿 `due_at` 做本地倒计时，与服务端
+        在 `GET /follow-ups` 上对未逾期行的处理方式完全一致。
+      properties:
+        id: { type: integer, format: int64 }
+        student_id: { type: integer, format: int64 }
+        student_name: { type: string }
+        due_at: { type: string, format: date-time }
+
+    StudentFollowUpRow:
+      type: object
+      description: |
+        学生抽屉里 `follow_ups[]` 的一行（`service.FollowUpRow`，`student_detail.go:66-85`）。
+
+        它**不是** `FollowUp` 的别名，所以这里必须有自己的一份 schema。此前
+        `StudentDetail.follow_ups.items` 直接指向 `FollowUp`，等于声明了两类这个端点从不发出的形状
+        （`overdue_hours` 与 `parent_note*`），而契约里一个永不出现的字段比没有字段更糟：
+        照着文档写出来的客户端会渲染一片空白，并且无法把它和「这个字段恰好没有值」区分开 ——
+        这一点本仓库已经在 `lowCreditRow`（`handler/dashboard.go:56-60`）上付过一次学费。
+
+        两处缺口各自都是有意的，不要去补齐：
+
+        1. **没有 `overdue_hours`。** 抽屉从来没有算过 SLA 差值。要补上就得把
+           `service/trial.go:204-227` 那段「只有仍是 pending 且已过 `due_at` 才赋值」的派生规则
+           再实现一遍，于是同一套 SLA 有了第二个真相源 —— 而前端本来就有本地倒计时回落
+           （`FollowUp.overdue_hours` 的第 3 条写了这套回落的约定），不需要服务端再给一份。
+        2. **没有 `parent_note` / `parent_note_at` / `parent_note_by_user_id`。** 对外那段话在抽屉里是
+           **另一个数组** `parent_updates`，从同一张表按 `parent_note IS NOT NULL` 取的。
+           把同一句话也塞进这一行，屏幕上就会出现两遍，而这两遍会各自漂移。
+
+        发现它比 `FollowUp` 少字段时，先问「这个端点的读者是不是真的需要它」，再决定加。
+        `source` 是本轮加进来的唯一一个字段，理由就是这里的读取者第一次需要分辨两类来源。
+
+        **空值口径与 `FollowUp` 不同，三处都不能混着判**（这个结构体用的是值类型而不是指针加
+        `omitempty`）：`trial_id` / `completed_at` / `completed_by_user_id` 为 NULL 时发**显式的
+        `null`**（`FollowUp` 那边是键整个缺席）；`note` 为 NULL 时发**空串 `""`**，既不是 `null`
+        也不是键缺席。
+      properties:
+        id: { type: integer, format: int64 }
+        student_id: { type: integer, format: int64 }
+        student_name: { type: string }
+        trial_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: "为 NULL 时发 `null`（`*uint64` 无 `omitempty`）。与 `FollowUp.trial_id` 的口径**相反**，那边是键缺席"
+        source:
+          type: string
+          enum: [trial, teacher_note]
+          description: |
+            同 `FollowUp.source`。这一支是**显式列清单**挑出来的（`student_detail.go:185-190`），
+            所以新增来源列时必须同时加到这里 —— 否则它不会报错、不会编译失败、测试也不会红，
+            只会让这个端点的每一行少一个键。本轮已经因为同一原因修过一次。
+        due_at: { type: string, format: date-time }
+        status: { type: string, enum: [pending, done, overdue] }
+        completed_at: { type: string, format: date-time, nullable: true }
+        completed_by_user_id: { type: integer, format: int64, nullable: true }
+        note:
+          type: string
+          description: "顾问的处理说明。为 NULL 时发**空串**，不是 `null`（值类型，非指针）—— 与 `FollowUp.note` 的「键缺席」是两回事"
+
     TrialRow:
       type: object
       description: |
-        仪表盘试听队列的一行。`subject_name` / `teacher_name` 在 Go 侧是
-        `model.Trial` 上带 `omitempty` 的联表派生字段（model.go:256-258）——
-        为空时**键整个缺席**，字段值不是 `null`。因此这两个字段**不写
-        `nullable: true`**：那会声明一个永远不会出现的 `null`，客户端会去判空
-        `null` 而实际要判的是 `undefined`（`?? '—'` 恰好两者都能兜住，但类型
-        声明应当描述真实情况）。此 schemas 的字段本就非 required。
+        仪表盘试听队列的一行，由 `handler/dashboard.go` 的 `trialRow` 产出。注意它是
+        **专为本仪表盘写的 DTO，不是 `model.Trial`** —— 两者的字段集与 JSON 行为都不同，
+        别互相照抄兜底代码。
+        `subject_name` / `teacher_name` 在这里是**普通 `string`、不带 `omitempty`**：
+        没有科目/老师时吐的是**空串 `""`**，键恒在，也不会是 `null`。所以这两个字段
+        不写 `nullable: true`（那会声明一个永远不会出现的 `null`），但客户端必须用
+        `|| '—'` 或显式判空串来回落 —— **`?? '—'` 兜不住空串，会渲染出一段空白**。
+        （`GET /trials` 那条路上的 `model.Trial.subject_name` 才是带 `omitempty`、
+        为空时整键缺席的那一个，那边 `??` 才成立。两条路的要求刚好相反。）
+        本 schema 的字段本就非 required。
       properties:
         id: { type: integer, format: int64 }
         student_id: { type: integer, format: int64 }
@@ -1998,12 +2305,25 @@ components:
           type: string
           description: 带 omitempty：无老师时键缺席（undefined），不是 null
         scheduled_at: { type: string, format: date-time }
+        duration_min:
+          type: integer
+          example: 60
+          description: |
+            试听时长（分钟）。**两段试听队列靠它区分**：`scheduled_at + duration_min <= now`
+            即「已上完」，这正是 `awaiting_outcome_trials` 的判据，也是前端决定
+            「记录结果」按钮能不能点的依据。
+            服务端**刻意不下发**算好的结束时刻或一个 `ended` 布尔位：「有没有上完」是
+            展示期判断，而 `frontend/src/lib/format.ts` 的 `hoursSinceEnd(startIso, durationMin)`
+            已经在做同一件事（`GET /trials` 那条路也走它）。两边共用一处实现，
+            比每个端点各发一个自己的派生字段更不容易走样。
+            判定要用 `COALESCE(duration_min, 60)`：列在 schema 里可空，
+            尽管 CreateTrial 会给它填 60（service/trial.go:45-47）。
         outcome: { type: string, enum: [pending, converted, lost] }
 
     LowCreditRow:
       type: object
       description: |
-        **刻意没有 "还能上几周" 字段**（handler/dashboard.go:49-53）：估算耗尽时间需要每个学生的
+        **刻意没有 "还能上几周" 字段**（handler/dashboard.go:56-60）：估算耗尽时间需要每个学生的
         每周消耗速率，本项目没有计算它。契约若声明一个永不填充的字段，比不声明更糟 ——
         客户端会在本该显示数字的位置渲染空白，且无法与"真的为 0"区分。
       properties:
