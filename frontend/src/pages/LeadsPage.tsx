@@ -1,32 +1,48 @@
 /**
- * 线索与试听 —— admin 的转化工作面。
+ * 线索与试听 —— admin 的转化工作面，也是**漏斗全流程**的唯一入口。
  *
- * 左栏：试听列表，行内就地记录结果（converted / lost）。记录结果是 R2 的触发器，
- *      服务端在**同一个事务**里生成 due_at = now + 48h 的跟进任务，所以成功回调里
- *      立刻重拉两份数据 —— 新跟进不需要手动刷新就会出现，并高亮几秒。
+ * 左栏：五档看板。前四档是试听行（GET /trials），「线索」档是学生行
+ *      （GET /students?status=lead）—— 漏斗的头两跳就长在这一栏上：
+ *      「添加线索」登记一条 lead，线索行里的「安排试听」把 lead 推进到 trial
+ *      （服务端在同一个事务里改状态，见 service/trial.go:57），第五跳
+ *      「记录结果」再把 trial 推到 active。三跳都在这一屏里完成，不跳页。
+ *      记录结果同时是 R2 的触发器：服务端在同一事务里生成 due_at = now + 48h 的跟进，
+ *      所以成功回调会立刻重拉，新跟进不需要手动刷新就出现在右栏。
  * 右栏：48h 跟进队列（是否逾期由服务端过滤，见 LeadsPage.Queue.tsx）。
- * 抽屉：本作业唯一的 LLM 特性 —— 转化 playbook，降级路径显式可见。
+ * 抽屉：转化 playbook（本作业唯一的 LLM 特性）、登记线索、安排试听。
  *
  * 两条队列都是**服务端分页**：页码、总数、has_more 全部来自响应信封，前端不自己切片、
- * 也不按时间戳重算（ADR-007）。切换筛选一律回到第 1 页。
+ * 也不按时间戳重算（ADR-007）。切换档位一律回到第 1 页。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router';
-import { BellRing, ClipboardList } from 'lucide-react';
+import { BellRing, ClipboardList, UserPlus, Users } from 'lucide-react';
 import { api, humaniseError } from '../lib/api';
 import type { PageMeta } from '../lib/api';
+import { useAuth } from '../lib/auth';
 import { useToast } from '../components/Toast';
-import { chipStateClass, Panel, PanelHeader } from '../components/ui';
+import { Button, chipStateClass, Panel, PanelHeader } from '../components/ui';
 import LeadsTrials from './LeadsPage.Trials';
+import LeadsProspects from './LeadsPage.Prospects';
+import { CreateLeadDrawer } from './LeadsPage.CreateLeadDrawer';
+import { BookTrialDrawer } from './LeadsPage.BookTrialDrawer';
 import LeadsQueue from './LeadsPage.Queue';
 import LeadsPlaybook from './LeadsPage.Playbook';
 import type { FollowUpListRow, TrialListRow } from './LeadsPage.Shared';
 import type { QueueFilter } from './LeadsPage.Queue';
+import type { StudentListItem, StudentPage } from '../lib/types';
 
-type OutcomeFilter = 'all' | 'pending' | 'converted' | 'lost';
+/**
+ * 左栏的五个档位。前四档看的是**试听行**（GET /trials），只有「线索」档换行模型、
+ * 看学生行（GET /students?status=lead）。所以这个类型不再只装 outcome —— 名字与
+ * 「试听结果」解耦，免得下一次读代码的人以为 leads 也是一个 outcome 值。
+ */
+type BoardFilter = 'all' | 'leads' | 'pending' | 'converted' | 'lost';
 
-const OUTCOME_TABS: { key: OutcomeFilter; label: string }[] = [
+/** outcome 参数映射：只有这四档会真的送给 GET /trials。 */
+const BOARD_TABS: { key: BoardFilter; label: string }[] = [
   { key: 'all', label: '全部' },
+  { key: 'leads', label: '线索' },
   { key: 'pending', label: '待记录结果' },
   { key: 'converted', label: '已转化' },
   { key: 'lost', label: '未转化' },
@@ -53,17 +69,30 @@ interface FollowUpPageShape extends PageMeta {
 
 export default function LeadsPage() {
   const { push } = useToast();
+  const { me } = useAuth();
+  const myId = me?.user.id;
   const { id: routeId } = useParams();
   const deepId = routeId && /^\d+$/.test(routeId) ? Number(routeId) : null;
 
   const [trials, setTrials] = useState<TrialListRow[]>([]);
   const [trialsLoading, setTrialsLoading] = useState(true);
   const [trialsError, setTrialsError] = useState<unknown>(null);
-  const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter>('all');
+  const [boardFilter, setBoardFilter] = useState<BoardFilter>('all');
   const [studentFilter, setStudentFilter] = useState<number | null>(null);
   const [trialsPage, setTrialsPage] = useState(1);
   const [trialsTotal, setTrialsTotal] = useState(0);
   const [trialsHasMore, setTrialsHasMore] = useState(false);
+
+  // 线索档是另一个模型（学生行），所以另起一套状态。loading 初值为 true 与试听那一路一致：
+  // 页面默认不在这一档，但一旦切过来，第一帧就该是骨架屏而不是「暂无线索」。
+  const [leads, setLeads] = useState<StudentListItem[]>([]);
+  const [leadsLoading, setLeadsLoading] = useState(true);
+  const [leadsError, setLeadsError] = useState<unknown>(null);
+  const [leadsPage, setLeadsPage] = useState(1);
+  const [leadsTotal, setLeadsTotal] = useState(0);
+  const [leadsHasMore, setLeadsHasMore] = useState(false);
+  /** 登记线索后用 +1 强制重拉：若用户本来就停在线索档第 1 页，没有任何依赖会变。 */
+  const [leadsNonce, setLeadsNonce] = useState(0);
 
   const [queue, setQueue] = useState<FollowUpListRow[]>([]);
   const [queueLoading, setQueueLoading] = useState(true);
@@ -78,15 +107,20 @@ export default function LeadsPage() {
   const [selectedFollowUp, setSelectedFollowUp] = useState<FollowUpListRow | null>(null);
   const [followUpNonce, setFollowUpNonce] = useState(0);
   const [newFollowUpId, setNewFollowUpId] = useState<number | null>(null);
+  const [creatingLead, setCreatingLead] = useState(false);
+  const [bookingFor, setBookingFor] = useState<StudentListItem | null>(null);
   const deepLinkDone = useRef(false);
 
   /** 返回本次加载到的条数（失败返回 null）—— recordOutcome 靠它判断是否停在了空页上。 */
   const loadTrials = useCallback(async (): Promise<number | null> => {
+    // 线索档看的是另一个模型，没有必要同时拉试听：那会让面板标题与计数短暂地指向
+    // 一份不会显示的数据。离开这一档时 loadTrials 的身份会变，effect 自然重拉。
+    if (boardFilter === 'leads') return null;
     setTrialsLoading(true);
     setTrialsError(null);
     try {
       const res = await api.get<TrialPageShape>('/trials', {
-        outcome: outcomeFilter === 'all' ? undefined : outcomeFilter,
+        outcome: boardFilter === 'all' ? undefined : boardFilter,
         student_id: studentFilter ?? undefined,
         page: trialsPage,
         limit: PAGE_SIZE,
@@ -101,7 +135,37 @@ export default function LeadsPage() {
     } finally {
       setTrialsLoading(false);
     }
-  }, [outcomeFilter, studentFilter, trialsPage]);
+  }, [boardFilter, studentFilter, trialsPage]);
+
+  /**
+   * 线索档的读取路径。行是**学生**，不是试听。
+   *
+   * owner_admin_id=me 与 GET /trials 的归属收口一致（handler/trial.go:69 也是只给
+   * 自己名下的）：这一栏回答的是「我手上还有哪些线索没约」，不是学生总目录。
+   * status=lead 让「已约上试听」的家庭自动离开这一栏 —— 推进状态的是服务端，不是这里。
+   */
+  const loadLeads = useCallback(async (): Promise<number | null> => {
+    if (boardFilter !== 'leads') return null;
+    setLeadsLoading(true);
+    setLeadsError(null);
+    try {
+      const res = await api.get<StudentPage>('/students', {
+        status: 'lead',
+        owner_admin_id: 'me',
+        page: leadsPage,
+        limit: PAGE_SIZE,
+      });
+      setLeads(res.items);
+      setLeadsTotal(res.total);
+      setLeadsHasMore(res.has_more);
+      return res.items.length;
+    } catch (err) {
+      setLeadsError(err);
+      return null;
+    } finally {
+      setLeadsLoading(false);
+    }
+  }, [boardFilter, leadsPage, leadsNonce]);
 
   /** 与 loadTrials 同形：返回本次加载到的条数（失败返回 null），供空页回退判断。 */
   const loadQueue = useCallback(async (): Promise<number | null> => {
@@ -145,12 +209,19 @@ export default function LeadsPage() {
   }, [loadQueue, loadCounts]);
 
   /**
-   * 切换筛选必须回到第 1 页。三个 change* 把这条不变量收在一处 —— 散在每个 onClick 里
+   * 切换档位必须回到第 1 页。三个 change* 把这条不变量收在一处 —— 散在每个 onClick 里
    * 迟早会漏一个，而漏掉的表现是「全部第 3 页 → 切到已转化」停在一个永远为空的页上。
+   *
+   * 两个页长一起归位：两档共用同一块面板，切档时另一边不显示但页号留着，下次回来就
+   * 落在一个凭空的页码上。
    */
-  const changeOutcomeFilter = useCallback((next: OutcomeFilter) => {
-    setOutcomeFilter(next);
+  const changeBoardFilter = useCallback((next: BoardFilter) => {
+    setBoardFilter(next);
     setTrialsPage(1);
+    setLeadsPage(1);
+    // 学生筛选只作用于试听表（GET /trials 的 student_id 参数）。带着它进线索档，页头会
+    // 写着「已筛选学生 #12」而下面列的是全部线索 —— 页头与表格互相矛盾，所以清掉。
+    if (next === 'leads') setStudentFilter(null);
   }, []);
 
   const changeStudentFilter = useCallback((next: number | null) => {
@@ -168,8 +239,43 @@ export default function LeadsPage() {
   }, [loadTrials]);
 
   useEffect(() => {
+    void loadLeads();
+  }, [loadLeads]);
+
+  useEffect(() => {
     void refreshQueue();
   }, [refreshQueue]);
+
+  /**
+   * 登记线索成功。刚登完就要能看见他：切到线索档、回第 1 页（/students 默认按
+   * updated_at DESC，于是新记录在第一行），再用 nonce 强制重拉。
+   * nonce 不是多余的：如果用户本来就停在线索档第 1 页，上面几个 setState 里没有一个
+   * 会真的改变值，没有它就不会重拉，刚登的线索要手动刷新才出现。
+   *
+   * 不刷头部计数：新线索不会产生跟进任务，那两个数字不会变。
+   */
+  const handleLeadCreated = useCallback(() => {
+    setCreatingLead(false);
+    changeBoardFilter('leads');
+    setLeadsNonce((n) => n + 1);
+  }, [changeBoardFilter]);
+
+  /**
+   * 安排试听成功。这一跳同时改了两边的模型：试听表多一行、线索栏少一行（服务端把学生的
+   * status 从 lead 推到了 trial），所以两栏都要重算，并切到「待记录结果」档
+   * —— 用户的说法是「这样这个学生就进入到试听栏中」。
+   *
+   * 试听表的重拉由 effect 完成：boardFilter 从 leads 变成 pending，loadTrials 的身份随之
+   * 改变。这里不直接调 loadTrials() —— 那样会拿旧闭包再发一次请求，与 effect 那一次竞争。
+   * changeBoardFilter 顺带把两个页号都归位，所以原来那一页可能空掉的问题也一并消掉了。
+   */
+  const handleTrialBooked = useCallback(() => {
+    setBookingFor(null);
+    changeBoardFilter('pending');
+    // 只刷头部两个计数，走 loadCounts 而不是 refreshQueue：后者会把右栏队列一起置回
+    // loading、闪一下骨架屏，而安排试听根本不会产生或关闭跟进任务。
+    void loadCounts();
+  }, [changeBoardFilter, loadCounts]);
 
   /** `/leads/:id` 深链：先当试听 id 认；认不出就当作学生过滤条件。 */
   useEffect(() => {
@@ -256,6 +362,9 @@ export default function LeadsPage() {
     }
   }
 
+  /** 左栏当前挂的是哪张表：只有「线索」档换成学生行。 */
+  const onLeadsTab = boardFilter === 'leads';
+
   return (
     <main className="p-4 flex flex-col gap-4">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -281,40 +390,65 @@ export default function LeadsPage() {
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_400px] gap-4 items-start">
         <Panel>
           <PanelHeader
-            title="试听"
-            count={trialsTotal}
-            icon={<ClipboardList size={16} aria-hidden />}
+            // 标题与计数必须跟着档走：「线索」档挂在「试听」下面会自相矛盾 —— 一栏写着
+            // 「试听」，列出来的却是还没约过试听的学生。
+            title={onLeadsTab ? '线索' : '试听'}
+            count={onLeadsTab ? leadsTotal : trialsTotal}
+            icon={onLeadsTab ? <Users size={16} aria-hidden /> : <ClipboardList size={16} aria-hidden />}
             action={
               <div className="flex items-center gap-1">
-                {OUTCOME_TABS.map((tab) => (
+                {BOARD_TABS.map((tab) => (
                   <button
                     key={tab.key}
                     type="button"
-                    onClick={() => changeOutcomeFilter(tab.key)}
-                    aria-pressed={outcomeFilter === tab.key}
+                    onClick={() => changeBoardFilter(tab.key)}
+                    aria-pressed={boardFilter === tab.key}
                     className={`h-6 rounded-sm px-2 text-meta font-510 transition-colors duration-150 ease-standard ${chipStateClass(
-                      outcomeFilter === tab.key,
+                      boardFilter === tab.key,
                     )}`}
                   >
                     {tab.label}
                   </button>
                 ))}
+                {/* 漏斗的第一跳，所以不藏在「线索」档里：哪一档都该能登记新线索。
+                    用 secondary 而非 primary —— 紧邻的选中档位已经是实心 accent，
+                    再放一个同色实心按钮会让两个「当前」互抢。 */}
+                <Button variant="secondary" size="sm" className="ml-1" onClick={() => setCreatingLead(true)}>
+                  <UserPlus size={16} aria-hidden />
+                  添加线索
+                </Button>
               </div>
             }
           />
-          <LeadsTrials
-            trials={trials}
-            loading={trialsLoading}
-            error={trialsError}
-            onRetry={() => void loadTrials()}
-            selectedId={selected?.id ?? null}
-            onSelect={setSelected}
-            onRecord={recordOutcome}
-            total={trialsTotal}
-            page={trialsPage}
-            hasMore={trialsHasMore}
-            onPageChange={setTrialsPage}
-          />
+          {onLeadsTab ? (
+            <LeadsProspects
+              leads={leads}
+              loading={leadsLoading}
+              error={leadsError}
+              onRetry={() => void loadLeads()}
+              myId={myId}
+              onBook={(student) => setBookingFor(student)}
+              onCreate={() => setCreatingLead(true)}
+              total={leadsTotal}
+              page={leadsPage}
+              hasMore={leadsHasMore}
+              onPageChange={setLeadsPage}
+            />
+          ) : (
+            <LeadsTrials
+              trials={trials}
+              loading={trialsLoading}
+              error={trialsError}
+              onRetry={() => void loadTrials()}
+              selectedId={selected?.id ?? null}
+              onSelect={setSelected}
+              onRecord={recordOutcome}
+              total={trialsTotal}
+              page={trialsPage}
+              hasMore={trialsHasMore}
+              onPageChange={setTrialsPage}
+            />
+          )}
         </Panel>
 
         <Panel>
@@ -346,6 +480,17 @@ export default function LeadsPage() {
         onClose={() => setSelected(null)}
         onCompleteFollowUp={completeFollowUp}
       />
+
+      {/* 两个写入抽屉。都按条件挂载而不是传 open：抽屉内部是「一到场就打开」的语义，
+          条件挂载让「关掉」与「卸载」是同一个动作，不会留下上一次的半填状态。 */}
+      {creatingLead && <CreateLeadDrawer onClose={() => setCreatingLead(false)} onCreated={handleLeadCreated} />}
+      {bookingFor && (
+        <BookTrialDrawer
+          student={bookingFor}
+          onClose={() => setBookingFor(null)}
+          onBooked={handleTrialBooked}
+        />
+      )}
     </main>
   );
 }

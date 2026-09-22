@@ -1,4 +1,9 @@
-/** 墨尔本墙上时钟的展示工具。服务端保证所有时间串已是 +10:00 本地时间，前端不做时区换算。 */
+/**
+ * 墨尔本墙上时钟的展示工具。服务端保证所有时间串都带墨尔本偏移，前端**只截取、不换算**。
+ *
+ * 唯一的例外是文件末尾的 melbourneInstant() —— 安排试听时要拼一个绝对时刻送上服务端，
+ * 那里必须自己算对偏移。除此之外这个文件里的函数都不做时区推理。
+ */
 
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const WEEKDAYS_LONG = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
@@ -99,6 +104,41 @@ export function overdueLabel(hours: number | null | undefined): string | null {
   if (hours === null || hours === undefined || hours <= 0) return null;
   if (hours >= 24) return `逾期 ${Math.floor(hours / 24)} 天`;
   return `逾期 ${Math.max(1, Math.round(hours))} 小时`;
+}
+
+/**
+ * 墨尔本在**某个日期**上的 UTC 偏移，形如 "+11:00"。
+ *
+ * 为什么不写死 "+10:00"：那是 AEST 的偏移，而墨尔本 10 月到 4 月是 AEDT 的 "+11:00"。
+ * 写死会在夏令时期间整整差一小时，而且错得很安静 —— 服务端照收不误，只是约错了时间。
+ * `timeZoneName: 'longOffset'` 是运行时给出的真值，比手写一张 DST 表可靠。
+ *
+ * 取样点用 **UTC 正午**：它落在墨尔本当天 22:00/23:00，永远与目标日期同一天，
+ * 也永远落在当天凌晨那次夏令时切换的同一侧（业务时段内不会有第二次切换）。
+ * 若改成拿墨尔本本地午夜去问偏移，在切换日反而会取到前一天的偏移。
+ */
+export function melbourneOffset(date: string): string {
+  const raw = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Australia/Melbourne',
+    timeZoneName: 'longOffset',
+  })
+    .formatToParts(new Date(`${date}T12:00:00Z`))
+    .find((part) => part.type === 'timeZoneName')?.value;
+  // 形如 "GMT+11:00"；只给时区名不带日期时某些实现会省略偏移。墨尔本恒定有偏移，
+  // 兜底分支只是为了让返回值类型确定，不代表这里预期会走到。
+  return /GMT([+-]\d{2}:\d{2})/.exec(raw ?? '')?.[1] ?? '+10:00';
+}
+
+/**
+ * 把「墨尔本墙上时钟的日期 + 时刻」拼成一个**绝对时刻**（RFC3339）。
+ *
+ * 这是全 app 唯一一处前端要拼出一个绝对时刻送给服务端的地方，其余各处都只做「截取」：
+ * 展示用 shortDate / timeOfDay，请假与倒计时用 wallClock 解析服务端已带偏移的串，
+ * 建班送的是 weekday + start_min（相对时刻，绕开了时区）。所以唯独这里必须自己把偏移
+ * 算对 —— 见 melbourneOffset 里为什么不能沿用 MyCreditsPage.Shared.tsx 的 "+10:00"。
+ */
+export function melbourneInstant(date: string, time: string): string {
+  return `${date}T${time}:00${melbourneOffset(date)}`;
 }
 
 export function money(cents: number): string {
