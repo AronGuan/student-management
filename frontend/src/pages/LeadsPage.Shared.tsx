@@ -6,7 +6,7 @@
  *      `/follow-ups` 附带逾期小时数），而 Go 的 `omitempty` 又会让可空字段整键消失；
  *   2. `AiConversionCard` 的 id/kind/created_at 由服务端补，ConversionCard 本身不返回，
  *      统一在 normaliseCard() 里补齐**常量元数据**（不伪造任何内容字段）。
- * GET /follow-ups 返回的是 Page 包装而非裸数组，所以读取处一律走 unwrapList()。
+ * /trials 与 /follow-ups 都返回 Page 信封（items/total/page/limit/has_more），读取处直接取字段。
  */
 import { CircleCheck, CircleSlash, CircleDashed, CircleAlert, Clock } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';

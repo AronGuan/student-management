@@ -6,17 +6,20 @@
  *      立刻重拉两份数据 —— 新跟进不需要手动刷新就会出现，并高亮几秒。
  * 右栏：48h 跟进队列（是否逾期由服务端过滤，见 LeadsPage.Queue.tsx）。
  * 抽屉：本作业唯一的 LLM 特性 —— 转化 playbook，降级路径显式可见。
+ *
+ * 两条队列都是**服务端分页**：页码、总数、has_more 全部来自响应信封，前端不自己切片、
+ * 也不按时间戳重算（ADR-007）。切换筛选一律回到第 1 页。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router';
 import { BellRing, ClipboardList } from 'lucide-react';
 import { api, humaniseError } from '../lib/api';
+import type { PageMeta } from '../lib/api';
 import { useToast } from '../components/Toast';
 import { chipStateClass, Panel, PanelHeader } from '../components/ui';
 import LeadsTrials from './LeadsPage.Trials';
 import LeadsQueue from './LeadsPage.Queue';
 import LeadsPlaybook from './LeadsPage.Playbook';
-import { unwrapList } from './LeadsPage.Shared';
 import type { FollowUpListRow, TrialListRow } from './LeadsPage.Shared';
 import type { QueueFilter } from './LeadsPage.Queue';
 
@@ -29,10 +32,17 @@ const OUTCOME_TABS: { key: OutcomeFilter; label: string }[] = [
   { key: 'lost', label: '未转化' },
 ];
 
-/** GET /follow-ups 走标准 Page 包装 */
-interface FollowUpPageShape {
-  items?: FollowUpListRow[];
-  total?: number;
+/** 两条队列共用一个页长，免得「左 20 右 10」这种说不清来源的不一致。 */
+const PAGE_SIZE = 20;
+
+/** GET /trials 的分页信封（handler.Page）。裸数组已随契约校正废弃。 */
+interface TrialPageShape extends PageMeta {
+  items: TrialListRow[];
+}
+
+/** GET /follow-ups 的分页信封（handler.Page） */
+interface FollowUpPageShape extends PageMeta {
+  items: FollowUpListRow[];
 }
 
 export default function LeadsPage() {
@@ -45,47 +55,66 @@ export default function LeadsPage() {
   const [trialsError, setTrialsError] = useState<unknown>(null);
   const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter>('all');
   const [studentFilter, setStudentFilter] = useState<number | null>(null);
+  const [trialsPage, setTrialsPage] = useState(1);
+  const [trialsTotal, setTrialsTotal] = useState(0);
+  const [trialsHasMore, setTrialsHasMore] = useState(false);
 
   const [queue, setQueue] = useState<FollowUpListRow[]>([]);
   const [queueLoading, setQueueLoading] = useState(true);
   const [queueError, setQueueError] = useState<unknown>(null);
   const [queueFilter, setQueueFilter] = useState<QueueFilter>('pending');
+  const [queuePage, setQueuePage] = useState(1);
+  const [queueTotal, setQueueTotal] = useState(0);
+  const [queueHasMore, setQueueHasMore] = useState(false);
   const [counts, setCounts] = useState({ open: 0, overdue: 0 });
 
   const [selected, setSelected] = useState<TrialListRow | null>(null);
+  const [selectedFollowUp, setSelectedFollowUp] = useState<FollowUpListRow | null>(null);
+  const [followUpNonce, setFollowUpNonce] = useState(0);
   const [newFollowUpId, setNewFollowUpId] = useState<number | null>(null);
   const deepLinkDone = useRef(false);
 
-  const loadTrials = useCallback(async () => {
+  /** 返回本次加载到的条数（失败返回 null）—— recordOutcome 靠它判断是否停在了空页上。 */
+  const loadTrials = useCallback(async (): Promise<number | null> => {
     setTrialsLoading(true);
     setTrialsError(null);
     try {
-      const res = await api.get<TrialListRow[]>('/trials', {
+      const res = await api.get<TrialPageShape>('/trials', {
         outcome: outcomeFilter === 'all' ? undefined : outcomeFilter,
         student_id: studentFilter ?? undefined,
+        page: trialsPage,
+        limit: PAGE_SIZE,
       });
-      setTrials(unwrapList<TrialListRow>(res));
+      setTrials(res.items);
+      setTrialsTotal(res.total);
+      setTrialsHasMore(res.has_more);
+      return res.items.length;
     } catch (err) {
       setTrialsError(err);
+      return null;
     } finally {
       setTrialsLoading(false);
     }
-  }, [outcomeFilter, studentFilter]);
+  }, [outcomeFilter, studentFilter, trialsPage]);
 
   const loadQueue = useCallback(async () => {
     setQueueLoading(true);
     setQueueError(null);
     try {
-      const res = await api.get<FollowUpPageShape | FollowUpListRow[]>('/follow-ups', {
+      const res = await api.get<FollowUpPageShape>('/follow-ups', {
         status: queueFilter,
+        page: queuePage,
+        limit: PAGE_SIZE,
       });
-      setQueue(unwrapList<FollowUpListRow>(res));
+      setQueue(res.items);
+      setQueueTotal(res.total);
+      setQueueHasMore(res.has_more);
     } catch (err) {
       setQueueError(err);
     } finally {
       setQueueLoading(false);
     }
-  }, [queueFilter]);
+  }, [queueFilter, queuePage]);
 
   /** 头部计数只用 Page 包装里的 total，不为了两个数字拉整页数据 */
   const loadCounts = useCallback(async () => {
@@ -104,6 +133,25 @@ export default function LeadsPage() {
     await Promise.all([loadQueue(), loadCounts()]);
   }, [loadQueue, loadCounts]);
 
+  /**
+   * 切换筛选必须回到第 1 页。三个 change* 把这条不变量收在一处 —— 散在每个 onClick 里
+   * 迟早会漏一个，而漏掉的表现是「全部第 3 页 → 切到已转化」停在一个永远为空的页上。
+   */
+  const changeOutcomeFilter = useCallback((next: OutcomeFilter) => {
+    setOutcomeFilter(next);
+    setTrialsPage(1);
+  }, []);
+
+  const changeStudentFilter = useCallback((next: number | null) => {
+    setStudentFilter(next);
+    setTrialsPage(1);
+  }, []);
+
+  const changeQueueFilter = useCallback((next: QueueFilter) => {
+    setQueueFilter(next);
+    setQueuePage(1);
+  }, []);
+
   useEffect(() => {
     void loadTrials();
   }, [loadTrials]);
@@ -118,8 +166,43 @@ export default function LeadsPage() {
     deepLinkDone.current = true;
     const match = trials.find((t) => t.id === deepId);
     if (match) setSelected(match);
-    else setStudentFilter(deepId);
-  }, [deepId, trials, trialsLoading]);
+    else changeStudentFilter(deepId);
+  }, [deepId, trials, trialsLoading, changeStudentFilter]);
+
+  const selectedStudentId = selected?.student_id ?? null;
+
+  /**
+   * 抽屉里的「完成跟进」不能只在**当前页**里找那条跟进：分页之后它大概率落在别的页。
+   * 所以按学生定点查一次。
+   *
+   * **刻意不传 status**：pending 与 overdue 在服务端是两个互斥的筛选值，传 pending 会把
+   * 逾期那条漏掉，而逾期恰恰是最该被完成的那条。取回后在前端挑 status !== 'done'。
+   *
+   * followUpNonce 用来在「记录结果 / 完成跟进」之后强制重查 —— 那两件事都会改变这个
+   * 学生的未关闭跟进集合。
+   */
+  useEffect(() => {
+    if (selectedStudentId === null) {
+      setSelectedFollowUp(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await api.get<FollowUpPageShape>('/follow-ups', {
+          student_id: selectedStudentId,
+          limit: PAGE_SIZE,
+        });
+        if (!cancelled) setSelectedFollowUp(res.items.find((row) => row.status !== 'done') ?? null);
+      } catch {
+        // 抽屉里的辅助信息：查不到就不给「完成跟进」按钮，不打扰主流程。
+        if (!cancelled) setSelectedFollowUp(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedStudentId, followUpNonce]);
 
   async function recordOutcome(trialId: number, outcome: 'converted' | 'lost', note: string) {
     try {
@@ -130,7 +213,11 @@ export default function LeadsPage() {
       );
       const created: FollowUpListRow = 'follow_up' in res ? res.follow_up : res;
       push('success', '结果已记录。跟进任务将在 48 小时后到期。');
-      await Promise.all([loadTrials(), refreshQueue()]);
+      const [loadedCount] = await Promise.all([loadTrials(), refreshQueue()]);
+      // 刚记完结果的那一行可能正是本页最后一行，重拉后本页会空掉。服务端不会自动往前挪，
+      // 所以这里主动回退一页，否则用户停在一个永远为空的页面上。
+      if (loadedCount === 0 && trialsPage > 1) setTrialsPage((page) => page - 1);
+      setFollowUpNonce((n) => n + 1);
       if (created.id) {
         setNewFollowUpId(created.id);
         window.setTimeout(() => setNewFollowUpId(null), 8000);
@@ -146,15 +233,13 @@ export default function LeadsPage() {
       await api.post(`/follow-ups/${id}/complete`);
       push('success', '跟进已关闭。');
       await refreshQueue();
+      // 抽屉里那条刚被关掉，重查一次让「完成跟进」按钮消失。
+      setFollowUpNonce((n) => n + 1);
     } catch (err) {
       push('error', `跟进未关闭。${humaniseError(err)}`);
       throw err;
     }
   }
-
-  const activeFollowUp = selected
-    ? (queue.find((q) => q.student_id === selected.student_id && q.status !== 'done') ?? null)
-    : null;
 
   return (
     <main className="p-4 flex flex-col gap-4">
@@ -170,7 +255,7 @@ export default function LeadsPage() {
         {studentFilter !== null && (
           <button
             type="button"
-            onClick={() => setStudentFilter(null)}
+            onClick={() => changeStudentFilter(null)}
             className="text-meta text-accent hover:underline transition-colors duration-150 ease-standard"
           >
             清除学生筛选
@@ -182,7 +267,7 @@ export default function LeadsPage() {
         <Panel>
           <PanelHeader
             title="试听"
-            count={trials.length}
+            count={trialsTotal}
             icon={<ClipboardList size={16} aria-hidden />}
             action={
               <div className="flex items-center gap-1">
@@ -190,7 +275,7 @@ export default function LeadsPage() {
                   <button
                     key={tab.key}
                     type="button"
-                    onClick={() => setOutcomeFilter(tab.key)}
+                    onClick={() => changeOutcomeFilter(tab.key)}
                     aria-pressed={outcomeFilter === tab.key}
                     className={`h-6 rounded-sm px-2 text-meta font-510 transition-colors duration-150 ease-standard ${chipStateClass(
                       outcomeFilter === tab.key,
@@ -210,13 +295,17 @@ export default function LeadsPage() {
             selectedId={selected?.id ?? null}
             onSelect={setSelected}
             onRecord={recordOutcome}
+            total={trialsTotal}
+            page={trialsPage}
+            hasMore={trialsHasMore}
+            onPageChange={setTrialsPage}
           />
         </Panel>
 
         <Panel>
           <PanelHeader
             title="跟进队列"
-            count={counts.open + counts.overdue}
+            count={queueTotal}
             icon={<BellRing size={16} aria-hidden />}
           />
           <LeadsQueue
@@ -226,15 +315,19 @@ export default function LeadsPage() {
             onRetry={() => void loadQueue()}
             onComplete={completeFollowUp}
             filter={queueFilter}
-            onFilter={setQueueFilter}
+            onFilter={changeQueueFilter}
             highlightId={newFollowUpId}
+            total={queueTotal}
+            page={queuePage}
+            hasMore={queueHasMore}
+            onPageChange={setQueuePage}
           />
         </Panel>
       </div>
 
       <LeadsPlaybook
         trial={selected}
-        followUp={activeFollowUp}
+        followUp={selectedFollowUp}
         onClose={() => setSelected(null)}
         onCompleteFollowUp={completeFollowUp}
       />

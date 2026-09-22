@@ -7,7 +7,7 @@
  */
 import { useState } from 'react';
 import { CircleCheck, Phone } from 'lucide-react';
-import { Button, chipStateClass } from '../components/ui';
+import { Button, Pager, chipStateClass } from '../components/ui';
 import { ListState } from '../components/StateViews';
 import { dateTime } from '../lib/format';
 import { FollowUpStatus } from './LeadsPage.Shared';
@@ -30,6 +30,10 @@ export default function LeadsQueue({
   filter,
   onFilter,
   highlightId,
+  total,
+  page,
+  hasMore,
+  onPageChange,
 }: {
   items: FollowUpListRow[];
   loading: boolean;
@@ -39,6 +43,10 @@ export default function LeadsQueue({
   filter: QueueFilter;
   onFilter: (next: QueueFilter) => void;
   highlightId: number | null;
+  total: number;
+  page: number;
+  hasMore: boolean;
+  onPageChange: (next: number) => void;
 }) {
   const [busyId, setBusyId] = useState<number | null>(null);
 
@@ -89,6 +97,9 @@ export default function LeadsQueue({
       >
         <div className="divide-y divide-border">
           {items.map((item) => {
+            // 已知取舍：队列按 due_at 升序，新生成的跟进落在**末页**，所以刚记完结果时
+            // 这条高亮基本看不到（分页之前它就在第一屏）。这是既有排序行为的延续 ——
+            // 不为它改排序、也不强行跳页，真要看到就翻到末页。
             const isNew = highlightId === item.id;
             const done = item.status === 'done';
             return (
@@ -127,6 +138,11 @@ export default function LeadsQueue({
           })}
         </div>
       </ListState>
+
+      {/* 分页器只属于「有数据」这一态：加载中 / 空 / 报错都由 ListState 承担，不该出现翻页。 */}
+      {!loading && !error && (
+        <Pager page={page} total={total} shown={items.length} hasMore={hasMore} onPage={onPageChange} />
+      )}
 
       <p className="flex items-center gap-1.5 px-4 py-2 border-t border-border text-meta text-muted">
         <Phone size={16} aria-hidden />

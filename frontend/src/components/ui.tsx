@@ -106,6 +106,47 @@ export function PanelHeader({
   );
 }
 
+/* ── Pager ───────────────────────────────────────────────────────────────────
+   服务端分页的翻页条。范式取自学生页（`第 N 页 · 显示 X / Y 条` + 上一页/下一页），
+   抽出来是因为线索页的两条队列都要用 —— 抄第二遍就会开始走样。
+
+   total 为 0 时返回 null：那是空态，翻页没有意义。loading / error 两态由调用方拦
+   （只有它知道自己处在哪一态），所以这里只看 total。
+
+   右栏面板只有 400px 宽，所以用 text-meta + size="sm"，并允许 flex-wrap —— 否则窄
+   容器会把「下一页」挤出可视区。                                              */
+
+export function Pager({
+  page,
+  total,
+  shown,
+  hasMore,
+  onPage,
+}: {
+  page: number;
+  total: number;
+  shown: number;
+  hasMore: boolean;
+  onPage: (next: number) => void;
+}) {
+  if (total <= 0) return null;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-t border-border">
+      <span className="num text-meta text-muted">
+        第 {page} 页 · 显示 {shown} / {total} 条
+      </span>
+      <span className="flex items-center gap-1.5">
+        <Button size="sm" disabled={page <= 1} onClick={() => onPage(page - 1)}>
+          上一页
+        </Button>
+        <Button size="sm" disabled={!hasMore} onClick={() => onPage(page + 1)}>
+          下一页
+        </Button>
+      </span>
+    </div>
+  );
+}
+
 /* ── Form primitives ────────────────────────────────────────────────────── */
 
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(

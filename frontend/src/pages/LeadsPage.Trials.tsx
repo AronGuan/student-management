@@ -4,7 +4,7 @@
  */
 import { useState } from 'react';
 import { ChevronDown, ChevronRight, Sparkles } from 'lucide-react';
-import { Button, Input } from '../components/ui';
+import { Button, Input, Pager } from '../components/ui';
 import { ListState } from '../components/StateViews';
 import { dateTime } from '../lib/format';
 import { OutcomeBadge } from './LeadsPage.Shared';
@@ -20,6 +20,10 @@ export default function LeadsTrials({
   selectedId,
   onSelect,
   onRecord,
+  total,
+  page,
+  hasMore,
+  onPageChange,
 }: {
   trials: TrialListRow[];
   loading: boolean;
@@ -28,6 +32,10 @@ export default function LeadsTrials({
   selectedId: number | null;
   onSelect: (trial: TrialListRow) => void;
   onRecord: (trialId: number, outcome: 'converted' | 'lost', note: string) => Promise<void>;
+  total: number;
+  page: number;
+  hasMore: boolean;
+  onPageChange: (next: number) => void;
 }) {
   const [openId, setOpenId] = useState<number | null>(null);
   const [note, setNote] = useState('');
@@ -147,6 +155,11 @@ export default function LeadsTrials({
           })}
         </div>
       </ListState>
+
+      {/* 分页器只属于「有数据」这一态：加载中 / 空 / 报错都由 ListState 承担，不该出现翻页。 */}
+      {!loading && !error && (
+        <Pager page={page} total={total} shown={trials.length} hasMore={hasMore} onPage={onPageChange} />
+      )}
     </div>
   );
 }
