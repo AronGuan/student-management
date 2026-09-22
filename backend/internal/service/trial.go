@@ -116,6 +116,13 @@ func (s *TrialService) SetOutcome(db *gorm.DB, cfg *config.Config, trialID uint6
 		fu = &model.FollowUp{
 			StudentID: t.StudentID,
 			TrialID:   &trialID,
+			// Spelled out even though the column defaults to 'trial':
+			// a writer that leans on the default is depending on a value
+			// that lives in the schema, so the day it changes - or a
+			// migration re-creates the column differently - these rows get
+			// relabelled with nothing in the build reporting it. The path
+			// that knows why the row exists is the one that says so.
+			Source:    "trial",
 			DueAt:     due,
 			Status:    "pending",
 			CreatedAt: now,

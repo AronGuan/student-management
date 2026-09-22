@@ -264,12 +264,31 @@ type FollowUp struct {
 	ID                uint64     `gorm:"primaryKey;column:id" json:"id"`
 	StudentID         uint64     `gorm:"column:student_id" json:"student_id"`
 	TrialID           *uint64    `gorm:"column:trial_id" json:"trial_id,omitempty"`
+	// Source says why this row exists, and it is written by whichever path
+	// created the row rather than derived by whoever reads it. Reading
+	// "TrialID == nil means it came from the classroom" would be a
+	// sign-without-guard: the moment a third origin exists it silently
+	// mislabels every new row, and nothing - no constraint, no index, no
+	// test - would report it. As an ENUM column, a wrong value cannot be
+	// written at all.
+	//
+	// No omitempty, same footing as due_at / status / created_at below: the
+	// column is NOT NULL DEFAULT 'trial', so it always carries a value, and
+	// a reader never has to decide what a missing key meant.
+	Source            string     `gorm:"column:source" json:"source"`
 	DueAt             time.Time  `gorm:"column:due_at" json:"due_at"`
 	Status            string     `gorm:"column:status" json:"status"`
 	CompletedAt       *time.Time `gorm:"column:completed_at" json:"completed_at,omitempty"`
 	CompletedByUserID *uint64    `gorm:"column:completed_by_user_id" json:"completed_by_user_id,omitempty"`
 	Note              string     `gorm:"column:note" json:"note,omitempty"`
-	CreatedAt         time.Time  `gorm:"column:created_at" json:"created_at"`
+	// Pointers, not the plain string Note uses above: NULL is how a row says
+	// "the family was never told anything", and that has to stay
+	// distinguishable from a parent_note that holds an empty string - one is
+	// a decision nobody made, the other is a note somebody left blank.
+	ParentNote         *string    `gorm:"column:parent_note" json:"parent_note,omitempty"`
+	ParentNoteAt       *time.Time `gorm:"column:parent_note_at" json:"parent_note_at,omitempty"`
+	ParentNoteByUserID *uint64    `gorm:"column:parent_note_by_user_id" json:"parent_note_by_user_id,omitempty"`
+	CreatedAt          time.Time  `gorm:"column:created_at" json:"created_at"`
 
 	StudentName string `gorm:"->;-:migration" json:"student_name,omitempty"`
 	// OverdueHours is derived at read time so the UI never recomputes the
