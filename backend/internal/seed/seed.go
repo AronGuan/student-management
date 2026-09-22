@@ -498,14 +498,17 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 		//     did those blocks happen to use" is exactly the derivation
 		//     that goes stale the next time one of them is edited.
 		//
-		//  2. Every student still in the 'lead' or 'trial' stage is
-		//     skipped, and that is what keeps the roster believable
-		//     afterwards. mei.lin has exactly one of each - the two
-		//     samples the students page filters by. Any trial on either
-		//     one replays a lifecycle hop (promoteForTrial: lead -> trial,
-		//     or trial -> active when the outcome is converted), so both
-		//     samples would quietly turn 'active' and the 线索 /
-		//     已约试听 filters would come back empty.
+		//  2. The pool is the 'active' students, and that is what keeps the
+		//     roster believable afterwards. mei.lin has exactly one 'lead'
+		//     and one 'trial' student - the two samples the student list
+		//     shows as 线索 and 已约试听. A trial on the 'lead' one replays
+		//     lead -> trial, and a *converted* trial on the 'trial' one
+		//     replays trial -> active (promoteForTrial). Either hop moves
+		//     the sample out of the stage that names it, so the row leaves
+		//     the list for good - a 线索 that already booked is not a lead
+		//     any more, and a family that already converted is not waiting
+		//     to try a lesson. Keeping stage-1/2 students out of the 'lost'
+		//     and 'converted' buckets is what stops that.
 		//
 		//     The test is the student's status, not their position in this
 		//     slice. It used to be "index 7 and 9", which held only as long
@@ -516,15 +519,15 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 		//     carrying the field: promoteForTrial would still complete its
 		//     hops, and both reportStates invariants (convertedStillProspect,
 		//     bookedStillLead) would still read 0. The only symptom would be
-		//     the two student-page filters coming back empty - no error
+		//     a student list with no 线索 and no 已约试听 row - no error
 		//     anywhere, just a quietly less believable snapshot.
 		//
 		//     Hero (index 0) is 'active', so it stays eligible exactly as
 		//     before. The exclusion is deliberate, not an oversight.
 		//
-		// The other eleven students are cycled through, each with a
-		// subject cursor that persists across the three outcomes, so one
-		// student's three trials land on three different subjects.
+		// The eleven students above are cycled through, each with a subject
+		// cursor that persists across the three outcomes, so one student's
+		// three trials land on three different subjects.
 		const demoPerOutcome = 10
 		demo := []madeStudent{}
 		for _, s := range students {
@@ -533,6 +536,44 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 			}
 			demo = append(demo, s)
 		}
+
+		// pending (待记录结果) is the one tab that also draws on the 'trial'
+		// sample, and that is the whole point of the tab: a 首次试听 -
+		// booked, result not recorded yet - is what a booking queue exists
+		// to show. Without one, all ten rows belong to students who are
+		// already 在读, and the tab reads as a list of re-tries for
+		// converted families rather than as work waiting to be done.
+		//
+		// A 'trial'-stage student is safe here and unsafe in the other two
+		// buckets, and promoteForTrial is the whole reason: it replays a hop
+		// only for 'lead' (guarded by WHERE status='lead') and for
+		// 'converted' (it returns early for every other outcome). A pending
+		// row therefore leaves the student exactly where the booking put
+		// them - still 已约试听. The blanket exclusion above wants that same
+		// invariant, but it over-reaches: 'converted' is the only outcome
+		// that can turn the 已约试听 sample 'active', so only 'lost' and
+		// 'converted' need the narrower pool.
+		//
+		// The sample is listed once per pending row it should carry. The
+		// loop below hands out one row per pool entry per pass, and this
+		// pool is larger than the ten-row budget, so it only ever gets one
+		// pass: entries past the tenth are never reached at all. Listed
+		// once the sample would get a single row, and a single row is
+		// indistinguishable from an accident of ordering - the one thing
+		// this sample must not look like. Listing it twice also keeps the
+		// cursor below honest: two entries for one student must still land
+		// on two different subjects.
+		const pendingRowsPerTrialSample = 2
+		pendingPool := []madeStudent{}
+		for _, s := range students {
+			if s.OwnerIdx != 0 || s.Status != model.StudentTrial {
+				continue
+			}
+			for i := 0; i < pendingRowsPerTrialSample; i++ {
+				pendingPool = append(pendingPool, s)
+			}
+		}
+		pendingPool = append(pendingPool, demo...)
 		taken := map[[2]uint64]bool{}
 		{
 			var used []struct{ StudentID, SubjectID uint64 }
@@ -543,24 +584,39 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 				taken[[2]uint64{u.StudentID, u.SubjectID}] = true
 			}
 		}
-		subjCursor := make([]int, len(demo))
+		// Keyed by student id, not by position in a pool. A positional
+		// cursor assumes a student appears in exactly one pool at exactly
+		// one index, and the pending pool above breaks both halves of that:
+		// its 'trial' sample is absent from `demo` altogether and is listed
+		// twice in `pendingPool`. Two parallel cursor slices would answer
+		// the first half and silently misalign on the second - the sample's
+		// two rows would share one subject and the second would be lost to
+		// R1. Keyed by id, "which subjects has this student already tried"
+		// is the same answer whichever pool asks, so a student's three rows
+		// still land on three different subjects.
+		subjCursor := map[uint64]int{}
 		// Tidy wall-clock slots, the same shape the block above uses: the
 		// demo should show 4:00pm, not the minute the seed happened to run.
 		demoSlots := []int{16 * 60, 10 * 60, 17 * 60, 15 * 60, 11 * 60, 14 * 60}
 		demoSeq := 0
 		for oi, outcome := range []string{"lost", "converted", "pending"} {
+			// Only pending draws on the wider pool; see the block above.
+			pool := demo
+			if outcome == "pending" {
+				pool = pendingPool
+			}
 			placed := 0
 			for placed < demoPerOutcome {
 				progressed := false
-				for si, st := range demo {
+				for si, st := range pool {
 					if placed == demoPerOutcome {
 						break
 					}
 					// First subject this student has not already tried.
 					ci := -1
-					for subjCursor[si] < len(subjectIDs) {
-						c := subjCursor[si]
-						subjCursor[si]++
+					for subjCursor[st.ID] < len(subjectIDs) {
+						c := subjCursor[st.ID]
+						subjCursor[st.ID]++
 						if !taken[[2]uint64{st.ID, subjectIDs[c]}] {
 							ci = c
 							break
