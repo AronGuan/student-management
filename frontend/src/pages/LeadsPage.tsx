@@ -7,16 +7,37 @@
  *      （服务端在同一个事务里改状态，见 service/trial.go:57），第五跳
  *      「记录结果」再把 trial 推到 active。三跳都在这一屏里完成，不跳页。
  *      记录结果同时是 R2 的触发器：服务端在同一事务里生成 due_at = now + 48h 的跟进，
- *      所以成功回调会立刻重拉，新跟进不需要手动刷新就出现在右栏。
- * 右栏：48h 跟进队列（是否逾期由服务端过滤，见 LeadsPage.Queue.tsx）。
+ *      所以成功回调会立刻把页头的跟进计数刷新到位。
+ * 右栏：48h 跟进队列 —— **已隐藏**（2026-09-22 用户裁定）。详见下面那段。
  * 抽屉：转化 playbook（本作业唯一的 LLM 特性）、登记线索、安排试听。
  *
- * 两条队列都是**服务端分页**：页码、总数、has_more 全部来自响应信封，前端不自己切片、
- * 也不按时间戳重算（ADR-007）。切换档位一律回到第 1 页。
+ * 试听表与线索表都是**服务端分页**：页码、总数、has_more 全部来自响应信封，
+ * 前端不自己切片、也不按时间戳重算（ADR-007）。切换档位一律回到第 1 页。
+ *
+ * ── 右栏「跟进队列」为什么隐藏、能力去了哪、怎么恢复 ────────────────────────────
+ *
+ * 隐藏它**不丢任何写入能力**：
+ *   - 完成跟进 → 学生抽屉的转化卡上就有「完成跟进」（LeadsPage.Playbook.tsx:125），
+ *                走的是同一个 POST /follow-ups/:id/complete
+ *   - 后端一行未改 → GET /follow-ups 契约不变，页头那两个计数仍在用它
+ *   - 同目录的 LeadsPage.Queue.tsx **整份保留**，没有被删
+ *
+ * 恢复方式（三处，都在本文件）：
+ *   1. 渲染处把 <Panel title="跟进队列"> 那段注释放开；
+ *   2. 容器类换回 `grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_400px] gap-4 items-start`；
+ *   3. 按 git 历史还原被删掉的 queue* 状态、QUEUE_PAGE_SIZE、LeadsQueue 与 QueueFilter
+ *      的 import、loadQueue / refreshQueue / changeQueueFilter。
+ *      （这一段是 `noUnusedLocals` 逼出来的：右栏一停用，它们立刻变成编译错误，
+ *        所以只能跟着删，而不能像 TodayPage 那样只注释渲染块。）
+ *
+ * ⚠️ 已知缺口（隐藏右栏带来的，不是原有问题）：抽屉只能从「未转化」行的「转化方案」
+ * 按钮打开（LeadsPage.Trials.tsx:143），行本身不可点，已转化行也没有按钮。于是
+ * **已转化学生**的跟进在界面上没有入口了 —— 右栏在的时候正是它兜住了这一批。
+ * 要补的话是给试听行加一个统一的「打开抽屉」入口；没补之前，那批跟进只走服务端 API。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router';
-import { BellRing, ClipboardList, UserPlus, Users } from 'lucide-react';
+import { ClipboardList, UserPlus, Users } from 'lucide-react';
 import { api, humaniseError } from '../lib/api';
 import type { PageMeta } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -26,10 +47,8 @@ import LeadsTrials from './LeadsPage.Trials';
 import LeadsProspects from './LeadsPage.Prospects';
 import { CreateLeadDrawer } from './LeadsPage.CreateLeadDrawer';
 import { BookTrialDrawer } from './LeadsPage.BookTrialDrawer';
-import LeadsQueue from './LeadsPage.Queue';
 import LeadsPlaybook from './LeadsPage.Playbook';
 import type { FollowUpListRow, TrialListRow } from './LeadsPage.Shared';
-import type { QueueFilter } from './LeadsPage.Queue';
 import type { StudentListItem, StudentPage } from '../lib/types';
 
 /**
@@ -48,21 +67,15 @@ const BOARD_TABS: { key: BoardFilter; label: string }[] = [
   { key: 'lost', label: '未转化' },
 ];
 
-/** 试听表与抽屉定点查询共用这个页长（左栏一次 20 条，滚动列表的常规长度）。 */
+/** 试听表、线索表与抽屉定点查询共用这个页长（左栏一次 20 条，滚动列表的常规长度）。 */
 const PAGE_SIZE = 20;
-
-/**
- * 跟进队列**只**用它。右侧是 400px 窄栏，7 行是不用滚动就能一眼扫完的高度，
- * 比照搬 20 行更符合「扫一眼就知道现在该打给谁」的用途。
- */
-const QUEUE_PAGE_SIZE = 7;
 
 /** GET /trials 的分页信封（handler.Page）。裸数组已随契约校正废弃。 */
 interface TrialPageShape extends PageMeta {
   items: TrialListRow[];
 }
 
-/** GET /follow-ups 的分页信封（handler.Page） */
+/** GET /follow-ups 的分页信封（handler.Page）。页头计数与抽屉定点查询都用它。 */
 interface FollowUpPageShape extends PageMeta {
   items: FollowUpListRow[];
 }
@@ -94,19 +107,16 @@ export default function LeadsPage() {
   /** 登记线索后用 +1 强制重拉：若用户本来就停在线索档第 1 页，没有任何依赖会变。 */
   const [leadsNonce, setLeadsNonce] = useState(0);
 
-  const [queue, setQueue] = useState<FollowUpListRow[]>([]);
-  const [queueLoading, setQueueLoading] = useState(true);
-  const [queueError, setQueueError] = useState<unknown>(null);
-  const [queueFilter, setQueueFilter] = useState<QueueFilter>('pending');
-  const [queuePage, setQueuePage] = useState(1);
-  const [queueTotal, setQueueTotal] = useState(0);
-  const [queueHasMore, setQueueHasMore] = useState(false);
+  /**
+   * 页头的两个跟进计数。右栏隐藏后它们只剩这一个消费点，但**刻意保留**：
+   * 右栏没了以后，这是本页唯一提到「队列里还有东西」的地方，作为环境信号仍然有用，
+   * 而且数据来源（GET /follow-ups 的 total）跟右栏本来就是两条独立的路径。
+   */
   const [counts, setCounts] = useState({ open: 0, overdue: 0 });
 
   const [selected, setSelected] = useState<TrialListRow | null>(null);
   const [selectedFollowUp, setSelectedFollowUp] = useState<FollowUpListRow | null>(null);
   const [followUpNonce, setFollowUpNonce] = useState(0);
-  const [newFollowUpId, setNewFollowUpId] = useState<number | null>(null);
   const [creatingLead, setCreatingLead] = useState(false);
   const [bookingFor, setBookingFor] = useState<StudentListItem | null>(null);
   const deepLinkDone = useRef(false);
@@ -167,28 +177,6 @@ export default function LeadsPage() {
     }
   }, [boardFilter, leadsPage, leadsNonce]);
 
-  /** 与 loadTrials 同形：返回本次加载到的条数（失败返回 null），供空页回退判断。 */
-  const loadQueue = useCallback(async (): Promise<number | null> => {
-    setQueueLoading(true);
-    setQueueError(null);
-    try {
-      const res = await api.get<FollowUpPageShape>('/follow-ups', {
-        status: queueFilter,
-        page: queuePage,
-        limit: QUEUE_PAGE_SIZE,
-      });
-      setQueue(res.items);
-      setQueueTotal(res.total);
-      setQueueHasMore(res.has_more);
-      return res.items.length;
-    } catch (err) {
-      setQueueError(err);
-      return null;
-    } finally {
-      setQueueLoading(false);
-    }
-  }, [queueFilter, queuePage]);
-
   /** 头部计数只用 Page 包装里的 total，不为了两个数字拉整页数据 */
   const loadCounts = useCallback(async () => {
     try {
@@ -202,14 +190,8 @@ export default function LeadsPage() {
     }
   }, []);
 
-  /** 把队列这一路的加载条数透传给调用方（计数那条路不关心返回值）。 */
-  const refreshQueue = useCallback(async (): Promise<number | null> => {
-    const [loadedQueueCount] = await Promise.all([loadQueue(), loadCounts()]);
-    return loadedQueueCount;
-  }, [loadQueue, loadCounts]);
-
   /**
-   * 切换档位必须回到第 1 页。三个 change* 把这条不变量收在一处 —— 散在每个 onClick 里
+   * 切换档位必须回到第 1 页。两个 change* 把这条不变量收在一处 —— 散在每个 onClick 里
    * 迟早会漏一个，而漏掉的表现是「全部第 3 页 → 切到已转化」停在一个永远为空的页上。
    *
    * 两个页长一起归位：两档共用同一块面板，切档时另一边不显示但页号留着，下次回来就
@@ -229,11 +211,6 @@ export default function LeadsPage() {
     setTrialsPage(1);
   }, []);
 
-  const changeQueueFilter = useCallback((next: QueueFilter) => {
-    setQueueFilter(next);
-    setQueuePage(1);
-  }, []);
-
   useEffect(() => {
     void loadTrials();
   }, [loadTrials]);
@@ -242,9 +219,13 @@ export default function LeadsPage() {
     void loadLeads();
   }, [loadLeads]);
 
+  /**
+   * 页头计数只在挂载时拉一次。写操作造成的变化各自定点刷新（见 recordOutcome /
+   * completeFollowUp / handleTrialBooked），不靠这个 effect 兜底。
+   */
   useEffect(() => {
-    void refreshQueue();
-  }, [refreshQueue]);
+    void loadCounts();
+  }, [loadCounts]);
 
   /**
    * 登记线索成功。刚登完就要能看见他：切到线索档、回第 1 页（/students 默认按
@@ -268,12 +249,11 @@ export default function LeadsPage() {
    * 试听表的重拉由 effect 完成：boardFilter 从 leads 变成 pending，loadTrials 的身份随之
    * 改变。这里不直接调 loadTrials() —— 那样会拿旧闭包再发一次请求，与 effect 那一次竞争。
    * changeBoardFilter 顺带把两个页号都归位，所以原来那一页可能空掉的问题也一并消掉了。
+   * 头部两个计数顺带刷一次（只打 limit=1 的两个轻请求）。
    */
   const handleTrialBooked = useCallback(() => {
     setBookingFor(null);
     changeBoardFilter('pending');
-    // 只刷头部两个计数，走 loadCounts 而不是 refreshQueue：后者会把右栏队列一起置回
-    // loading、闪一下骨架屏，而安排试听根本不会产生或关闭跟进任务。
     void loadCounts();
   }, [changeBoardFilter, loadCounts]);
 
@@ -290,7 +270,8 @@ export default function LeadsPage() {
 
   /**
    * 抽屉里的「完成跟进」不能只在**当前页**里找那条跟进：分页之后它大概率落在别的页。
-   * 所以按学生定点查一次。
+   * 所以按学生定点查一次。右栏隐藏后这是**唯一**能查到「这个学生还有没有未关闭的跟进」
+   * 的地方，所以它比右栏在的时候更要紧了。
    *
    * **刻意不传 status**：pending 与 overdue 在服务端是两个互斥的筛选值，传 pending 会把
    * 逾期那条漏掉，而逾期恰恰是最该被完成的那条。取回后在前端挑 status !== 'done'。
@@ -306,8 +287,8 @@ export default function LeadsPage() {
     let cancelled = false;
     void (async () => {
       try {
-        // 这里刻意保持 PAGE_SIZE，**不要**跟着队列改成 QUEUE_PAGE_SIZE：下面只取第一条
-        // status !== 'done'，砍到 7 条会让跟进很多的学生的「完成跟进」按钮凭空消失，
+        // 这里刻意保持 PAGE_SIZE，**不要**为了「只看有没有」而砍到 1：下面只取第一条
+        // status !== 'done'，砍得太狠会让跟进很多的学生的「完成跟进」按钮凭空消失，
         // 而这不是用户要求的事。
         const res = await api.get<FollowUpPageShape>('/follow-ups', {
           student_id: selectedStudentId,
@@ -328,33 +309,34 @@ export default function LeadsPage() {
     try {
       // 服务端 handler/trial.go 直接 OK(c, fu)，data 就是新建的 FollowUp，
       // 没有 { trial, follow_up } 包装层（openapi.yaml 已按运行时校正）。
-      const created = await api.post<FollowUpListRow>(`/trials/${trialId}/outcome`, { outcome, note });
+      await api.post<FollowUpListRow>(`/trials/${trialId}/outcome`, { outcome, note });
       push('success', '结果已记录。跟进任务将在 48 小时后到期。');
-      const [loadedCount] = await Promise.all([loadTrials(), refreshQueue()]);
+      // 记录结果会新建一条跟进，所以页头计数要跟着动；试听表本身也要重拉
+      //（本行的 outcome 变了，当前档位下它可能已经不该出现在这里）。
+      const loadedCount = await loadTrials();
+      void loadCounts();
       // 刚记完结果的那一行可能正是本页最后一行，重拉后本页会空掉。服务端不会自动往前挪，
       // 所以这里主动回退一页，否则用户停在一个永远为空的页面上。
       if (loadedCount === 0 && trialsPage > 1) setTrialsPage((page) => page - 1);
+      // 抽屉里那条刚变出来的跟进：重查一次让「完成跟进」按钮出现。
       setFollowUpNonce((n) => n + 1);
-      if (created.id) {
-        setNewFollowUpId(created.id);
-        window.setTimeout(() => setNewFollowUpId(null), 8000);
-      }
     } catch (err) {
       push('error', `结果未记录。${humaniseError(err)}`);
       throw err;
     }
   }
 
+  /**
+   * 关闭一条跟进。**右栏隐藏后这里只剩两个消费点**：学生抽屉的转化卡
+   *（LeadsPage.Playbook.tsx:125）—— 所以不再需要重拉队列、也不再需要页码回退
+   *（那是右栏分页才有的问题）。只剩两件事：刷页头计数，以及让抽屉重查一次，
+   * 好让刚被关掉的那条对应的「完成跟进」按钮消失。
+   */
   async function completeFollowUp(id: number) {
     try {
       await api.post(`/follow-ups/${id}/complete`);
       push('success', '跟进已关闭。');
-      const loadedQueueCount = await refreshQueue();
-      // 关掉的这条可能正是本页最后一条。服务端不会自动往前挪，而队列现在一页只有 7 条，
-      // 「一页刚好被清空」的概率比 20 条一页时高得多，所以主动回退一页，
-      // 否则用户停在一个永远为空的页面上。
-      if (loadedQueueCount === 0 && queuePage > 1) setQueuePage((page) => page - 1);
-      // 抽屉里那条刚被关掉，重查一次让「完成跟进」按钮消失。
+      void loadCounts();
       setFollowUpNonce((n) => n + 1);
     } catch (err) {
       push('error', `跟进未关闭。${humaniseError(err)}`);
@@ -387,7 +369,10 @@ export default function LeadsPage() {
         )}
       </header>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_400px] gap-4 items-start">
+      {/* 右栏隐藏后这里只剩一列。容器**保留**（而不是把 <Panel> 提到 main 下面），
+          是为了恢复时只改这一行的类名 + 放回下面那段注释里的 <Panel>。
+          恢复：把类换回 `grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_400px] gap-4 items-start`。 */}
+      <div className="grid grid-cols-1 gap-4 items-start">
         <Panel>
           <PanelHeader
             // 标题与计数必须跟着档走：「线索」档挂在「试听」下面会自相矛盾 —— 一栏写着
@@ -451,6 +436,10 @@ export default function LeadsPage() {
           )}
         </Panel>
 
+        {/* 右栏「48h 跟进队列」已隐藏（2026-09-22 用户裁定）。
+            理由、能力去哪了、以及完整的恢复清单见文件头注释。
+            下面这段原样保留，注释放开即恢复（别忘了同时还原上面容器那一行的 grid 类、
+            以及本文件里被删掉的 queue* 状态与 loadQueue/refreshQueue/changeQueueFilter）。
         <Panel>
           <PanelHeader
             title="跟进队列"
@@ -472,6 +461,7 @@ export default function LeadsPage() {
             onPageChange={setQueuePage}
           />
         </Panel>
+        */}
       </div>
 
       <LeadsPlaybook

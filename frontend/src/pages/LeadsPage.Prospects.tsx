@@ -11,10 +11,14 @@
  * 行内唯一的动作是「安排试听」，且**只在 can_write 为真时渲染** —— R7：admin 能读全部
  * 学生，但只能写自己名下的。对别人的线索点一下只会拿到 40301，所以直接把按钮收掉，
  * 而不是让用户点了才知道。判断只认服务端算好的那个布尔，不在浏览器里比较 owner_admin_id。
+ *
+ * 末列不是「跟进」，是「录入 / 已晾 N 天」—— 理由见该列旁的注释：待跟进在这一档里
+ * 结构性不存在（跟进任务只在记录试听结果时生成，而那一刻学生已不再是线索）。
  */
 import { CalendarPlus } from 'lucide-react';
 import { Button, Pager } from '../components/ui';
 import { ListState } from '../components/StateViews';
+import { daysSince, shortDate } from '../lib/format';
 import type { StudentListItem } from '../lib/types';
 
 /**
@@ -59,7 +63,7 @@ export default function LeadsProspects({
         <span className="col-header">年级</span>
         <span className="col-header">来源</span>
         <span className="col-header">负责人</span>
-        <span className="col-header">跟进</span>
+        <span className="col-header">录入 / 已晾</span>
         <span className="col-header text-right">下一步</span>
       </div>
 
@@ -75,45 +79,62 @@ export default function LeadsProspects({
         cols={6}
       >
         <div className="divide-y divide-border">
-          {leads.map((student) => (
-            <div
-              key={student.id}
-              className={`${GRID} px-4 min-h-9 py-1.5 hover:bg-row-hover transition-colors duration-150 ease-standard`}
-            >
-              <span className="flex min-w-0 items-baseline gap-1.5">
-                <span className="truncate text-row font-510 text-fg" title={student.full_name}>
-                  {student.full_name}
+          {leads.map((student) => {
+            // 晾了多久。created_at 缺失或不可解析时按 0 走：说「今天录入」比说「已晾 — 天」
+            // 更少干扰 —— 这一列是提示，不是断言。
+            const days = daysSince(student.created_at) ?? 0;
+            // 一周没人动。阈值本身不重要，重要的是它可解释：顾问的回访节奏以周为单位。
+            // 刻意不用 danger —— 流失是经营常态，整片红色会污染语义（同 LeadsPage.Shared.tsx
+            // 的 OUTCOME 注释）。warn 只在这一格上，不传染整行。
+            const stale = days >= 7;
+            return (
+              <div
+                key={student.id}
+                className={`${GRID} px-4 min-h-9 py-1.5 hover:bg-row-hover transition-colors duration-150 ease-standard`}
+              >
+                <span className="flex min-w-0 items-baseline gap-1.5">
+                  <span className="truncate text-row font-510 text-fg" title={student.full_name}>
+                    {student.full_name}
+                  </span>
+                  {student.preferred_name && (
+                    <span className="truncate text-meta text-muted">{student.preferred_name}</span>
+                  )}
                 </span>
-                {student.preferred_name && (
-                  <span className="truncate text-meta text-muted">{student.preferred_name}</span>
-                )}
-              </span>
-              {/* year_level 与 source 在 Go 侧都是裸 string（不是 *string），空值给 "" 而非 null，
-                  所以下面两列必须用 || 兜底：用 ?? 会原样渲染空串，看起来像列没对齐。 */}
-              <span className="truncate text-meta text-muted">{student.year_level || '—'}</span>
-              <span className="truncate text-meta text-muted" title={student.source || undefined}>
-                {student.source || '—'}
-              </span>
-              <span className="truncate text-meta text-muted">
-                {student.owner_admin_id === myId ? '我' : student.owner_admin_name || '未分配'}
-              </span>
-              <span className="text-meta">
-                {student.pending_followup ? (
-                  <span className="font-510 text-warn">有待跟进</span>
-                ) : (
-                  <span className="text-muted">—</span>
-                )}
-              </span>
-              <span className="flex justify-end gap-2">
-                {student.can_write && (
-                  <Button variant="secondary" size="sm" onClick={() => onBook(student)}>
-                    <CalendarPlus size={16} aria-hidden />
-                    安排试听
-                  </Button>
-                )}
-              </span>
-            </div>
-          ))}
+                {/* year_level 与 source 在 Go 侧都是裸 string（不是 *string），空值给 "" 而非 null，
+                    所以下面两列必须用 || 兜底：用 ?? 会原样渲染空串，看起来像列没对齐。 */}
+                <span className="truncate text-meta text-muted">{student.year_level || '—'}</span>
+                <span className="truncate text-meta text-muted" title={student.source || undefined}>
+                  {student.source || '—'}
+                </span>
+                <span className="truncate text-meta text-muted">
+                  {student.owner_admin_id === myId ? '我' : student.owner_admin_name || '未分配'}
+                </span>
+                {/* 这一列此前是「跟进」，内容恒为「—」—— 结构性如此，不是数据没填：
+                    跟进任务只在**记录试听结果**那一刻生成（service/trial.go 的 SetOutcome），
+                    而那一刻学生已被推进到 trial、离开了这一档（同事务改 status）。于是
+                    pending_followup 在线索档永远是 false。留一列恒空的「跟进」会被读成
+                    「这些线索都有人跟进了」—— 与实际正相反。真正该问的是「晾了多久没人管」，
+                    那是 created_at 到今天的距离。
+                    主行给行动信号（已晾 N 天），副行给溯源（哪天进来的）。 */}
+                <span className="flex flex-col leading-tight">
+                  <span className={`text-meta font-510 ${stale ? 'text-warn' : 'text-muted'}`}>
+                    {days === 0 ? '今天录入' : `已晾 ${days} 天`}
+                  </span>
+                  <span className="truncate text-meta text-muted num">
+                    {shortDate(student.created_at)} 录入
+                  </span>
+                </span>
+                <span className="flex justify-end gap-2">
+                  {student.can_write && (
+                    <Button variant="secondary" size="sm" onClick={() => onBook(student)}>
+                      <CalendarPlus size={16} aria-hidden />
+                      安排试听
+                    </Button>
+                  )}
+                </span>
+              </div>
+            );
+          })}
         </div>
       </ListState>
 

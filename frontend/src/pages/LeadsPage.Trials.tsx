@@ -6,7 +6,7 @@ import { useState } from 'react';
 import { ChevronDown, ChevronRight, Sparkles } from 'lucide-react';
 import { Button, Input, Pager } from '../components/ui';
 import { ListState } from '../components/StateViews';
-import { dateTime } from '../lib/format';
+import { dateTime, endedAgoLabel, hoursSinceEnd } from '../lib/format';
 import { OutcomeBadge } from './LeadsPage.Shared';
 import type { TrialListRow } from './LeadsPage.Shared';
 
@@ -82,6 +82,15 @@ export default function LeadsTrials({
           {trials.map((trial) => {
             const isOpen = openId === trial.id;
             const isSelected = selectedId === trial.id;
+            // 「已结束但结果还没记」是这一档里唯一需要动作的状态：服务端已经把这些行
+            // 排到最前（handler/trial.go 的 pending 排序键），前端只负责让它们看得见。
+            // 未开始 / 正在试听的行不渲染任何东西 —— 顾问对它们无事可做，一个「还没结束」
+            // 的标记只是往表里加噪音。已转化 / 未转化的行也早已结束，但那些标签页是历史
+            // 列表，给每一行都挂一个「已结束 30 天」同样没有信息量，所以按 outcome 收口，
+            // 不按时间收口。
+            const endedHours =
+              trial.outcome === 'pending' ? hoursSinceEnd(trial.scheduled_at, trial.duration_min) : null;
+            const endedAgo = endedAgoLabel(endedHours);
             return (
               <div key={trial.id} className={isSelected ? 'bg-accent-bg' : ''}>
                 <div className={`${GRID} px-4 min-h-9 py-1.5 hover:bg-row-hover transition-colors duration-150 ease-standard`}>
@@ -90,13 +99,44 @@ export default function LeadsTrials({
                     {trial.student_name ?? `学生 #${trial.student_id}`}
                   </span>
                   <span className="text-row text-fg-2 truncate">{trial.subject_name ?? '—'}</span>
-                  <span className="num text-meta text-muted">{dateTime(trial.scheduled_at)}</span>
+                  <span className="flex flex-col leading-tight">
+                    <span className="num text-meta text-muted">{dateTime(trial.scheduled_at)}</span>
+                    {endedAgo !== null && (
+                      // 24 小时以内用 warn、超过用 danger：同一天下午刚下课和上周还没记
+                      // 是两件事，用同一个颜色会让「积压」看不出来。形状不变，只用颜色分级。
+                      //
+                      // ⚠️ 这里**绝不能**写 text-meta。本项目 index.css 里 `--color-meta`
+                      // 与 `--text-meta` 撞了名，Tailwind 只产出了后者中的颜色那一份
+                      // （编译产物里 `var(--text-meta)` 一次都不出现），于是 text-meta 实际
+                      // 是个**颜色**工具类；而 Tailwind 按 token 名字母序产出，`.text-meta`
+                      // 排在 `.text-danger` 之后 —— 同优先级下红色被静默盖成灰色。
+                      // 症状：只有 text-warn（字母序在 meta 之后）生效，红色全部失效。
+                      // text-row 只给字号、没有同名的颜色 token，与两者组合都安全
+                      // （LoginPage 的错误条就是 text-row + text-danger）。
+                      <span
+                        className={`text-row font-510 ${
+                          endedHours !== null && endedHours >= 24 ? 'text-danger' : 'text-warn'
+                        }`}
+                      >
+                        {endedAgo}
+                      </span>
+                    )}
+                  </span>
                   <span className="text-meta text-muted truncate">{trial.teacher_name ?? '未分配'}</span>
                   <span className="flex justify-end gap-2">
                     {trial.outcome === 'pending' ? (
                       <Button
                         variant="secondary"
                         size="sm"
+                        // 试听结束以后才可以记录结果 —— 与工作台同一条规则、同一个判据
+                        // （今天页的 canRecordOutcome 也是拿 hoursSinceEnd 现算）。
+                        // 这里直接用上面那个 endedAgo：它只对 pending 行求解，为 null 当且
+                        // 仅当「还没下课 / 时间戳解析不了」，正好是置灰条件，不必再算一遍。
+                        // 服务端不拦这一步：提前记录会得到一条比实际结束时刻更早起算的 48h 时钟。
+                        disabled={endedAgo === null}
+                        // 置灰时 Chrome 不弹原生 title（disabled 元素不派发鼠标事件），仍要写：
+                        // 它是这条规则给读屏与自动化测试的机器可读副本。
+                        title={endedAgo === null ? '试听结束后才能记录结果' : undefined}
                         onClick={() => {
                           setOpenId(isOpen ? null : trial.id);
                           setNote('');
@@ -120,7 +160,7 @@ export default function LeadsTrials({
                 {isOpen && (
                   <div className="px-4 pb-3 pt-1 bg-surface-sunken border-t border-border">
                     <p className="text-meta text-muted mb-2">
-                      记录结果会立即生成一条 48 小时后到期的跟进任务，并马上出现在右侧队列中。
+                      记录结果会立即生成一条 48 小时后到期的跟进任务（服务端同一事务）。到期前后都可以在学生抽屉的转化卡上「完成跟进」。
                     </p>
                     <div className="flex flex-wrap items-end gap-2">
                       <Input

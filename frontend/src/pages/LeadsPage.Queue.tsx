@@ -1,4 +1,12 @@
 /**
+ * ⚠️ 本组件**当前未被引用** —— /leads 右栏（48h 跟进队列）已隐藏（2026-09-22 用户裁定）。
+ * 理由与完整的恢复清单写在 LeadsPage.tsx 的文件头注释里；一句话版本：右栏在的时候
+ * 它同时是「浏览全部跟进」的唯一去处，而那个面板被读成了噪音，所以先撤下来。
+ * 文件整份保留是为了随时恢复 —— 恢复时记得同时还原 LeadsPage.tsx 里被删掉的
+ * queue* 状态、QUEUE_PAGE_SIZE、loadQueue/refreshQueue/changeQueueFilter 与容器 grid 类。
+ * 能力没有消失：POST /follow-ups/:id/complete 仍在，入口在学生抽屉的转化卡上
+ * （LeadsPage.Playbook.tsx:125）。
+ *
  * 48h 跟进队列（R2 的下游）。
  *
  * 逾期与否**由服务端过滤**（`?status=overdue` 走 SQL 的 due_at < now），文案用服务端
