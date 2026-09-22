@@ -69,7 +69,10 @@ export function unwrapList<T>(res: T[] | { items?: T[] } | null | undefined): T[
 
 const OUTCOME: Record<Trial['outcome'], { label: string; icon: LucideIcon; cls: string }> = {
   pending: {
-    label: '待反馈',
+    // 与左栏档位「待记录结果」用同一个名字。这个状态此前叫「待反馈」，同一个值在一屏里
+    // 有两个名字 —— 档位说「待记录结果」、行徽标说「待反馈」，读的人要先停下来确认
+    // 它们是不是一回事。一个状态只留一个名字。
+    label: '待记录结果',
     icon: CircleDashed,
     cls: 'border border-dashed border-border-strong text-muted',
   },
