@@ -10,7 +10,11 @@ import { dateTime } from '../lib/format';
 import { OutcomeBadge } from './LeadsPage.Shared';
 import type { TrialListRow } from './LeadsPage.Shared';
 
-const GRID = 'grid grid-cols-[104px_minmax(0,1.5fr)_minmax(0,1fr)_150px_minmax(0,1fr)_auto] gap-4 items-center';
+// 末列必须是固定轨道：表头与每一行都是各自的 grid 容器，`auto` 会按行解析 ——
+// 表头那格只有文字（窄）、已转化行是空（0）、未转化/待记录行是按钮（约 94px），
+// 于是每行各自解出一套模板，学生/科目/老师三列的列位就会随行漂移。
+// 固定 120px（按钮实测约 94px，留 26px 余量）后所有容器解出同一套轨道。
+const GRID = 'grid grid-cols-[104px_minmax(0,1.5fr)_minmax(0,1fr)_150px_minmax(0,1fr)_120px] gap-4 items-center';
 
 export default function LeadsTrials({
   trials,

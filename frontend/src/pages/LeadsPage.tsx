@@ -32,8 +32,14 @@ const OUTCOME_TABS: { key: OutcomeFilter; label: string }[] = [
   { key: 'lost', label: '未转化' },
 ];
 
-/** 两条队列共用一个页长，免得「左 20 右 10」这种说不清来源的不一致。 */
+/** 试听表与抽屉定点查询共用这个页长（左栏一次 20 条，滚动列表的常规长度）。 */
 const PAGE_SIZE = 20;
+
+/**
+ * 跟进队列**只**用它。右侧是 400px 窄栏，7 行是不用滚动就能一眼扫完的高度，
+ * 比照搬 20 行更符合「扫一眼就知道现在该打给谁」的用途。
+ */
+const QUEUE_PAGE_SIZE = 7;
 
 /** GET /trials 的分页信封（handler.Page）。裸数组已随契约校正废弃。 */
 interface TrialPageShape extends PageMeta {
@@ -97,20 +103,23 @@ export default function LeadsPage() {
     }
   }, [outcomeFilter, studentFilter, trialsPage]);
 
-  const loadQueue = useCallback(async () => {
+  /** 与 loadTrials 同形：返回本次加载到的条数（失败返回 null），供空页回退判断。 */
+  const loadQueue = useCallback(async (): Promise<number | null> => {
     setQueueLoading(true);
     setQueueError(null);
     try {
       const res = await api.get<FollowUpPageShape>('/follow-ups', {
         status: queueFilter,
         page: queuePage,
-        limit: PAGE_SIZE,
+        limit: QUEUE_PAGE_SIZE,
       });
       setQueue(res.items);
       setQueueTotal(res.total);
       setQueueHasMore(res.has_more);
+      return res.items.length;
     } catch (err) {
       setQueueError(err);
+      return null;
     } finally {
       setQueueLoading(false);
     }
@@ -129,8 +138,10 @@ export default function LeadsPage() {
     }
   }, []);
 
-  const refreshQueue = useCallback(async () => {
-    await Promise.all([loadQueue(), loadCounts()]);
+  /** 把队列这一路的加载条数透传给调用方（计数那条路不关心返回值）。 */
+  const refreshQueue = useCallback(async (): Promise<number | null> => {
+    const [loadedQueueCount] = await Promise.all([loadQueue(), loadCounts()]);
+    return loadedQueueCount;
   }, [loadQueue, loadCounts]);
 
   /**
@@ -189,6 +200,9 @@ export default function LeadsPage() {
     let cancelled = false;
     void (async () => {
       try {
+        // 这里刻意保持 PAGE_SIZE，**不要**跟着队列改成 QUEUE_PAGE_SIZE：下面只取第一条
+        // status !== 'done'，砍到 7 条会让跟进很多的学生的「完成跟进」按钮凭空消失，
+        // 而这不是用户要求的事。
         const res = await api.get<FollowUpPageShape>('/follow-ups', {
           student_id: selectedStudentId,
           limit: PAGE_SIZE,
@@ -229,7 +243,11 @@ export default function LeadsPage() {
     try {
       await api.post(`/follow-ups/${id}/complete`);
       push('success', '跟进已关闭。');
-      await refreshQueue();
+      const loadedQueueCount = await refreshQueue();
+      // 关掉的这条可能正是本页最后一条。服务端不会自动往前挪，而队列现在一页只有 7 条，
+      // 「一页刚好被清空」的概率比 20 条一页时高得多，所以主动回退一页，
+      // 否则用户停在一个永远为空的页面上。
+      if (loadedQueueCount === 0 && queuePage > 1) setQueuePage((page) => page - 1);
       // 抽屉里那条刚被关掉，重查一次让「完成跟进」按钮消失。
       setFollowUpNonce((n) => n + 1);
     } catch (err) {
