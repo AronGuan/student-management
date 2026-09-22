@@ -105,3 +105,30 @@ func queryUint(c *gin.Context, key string) (val uint64, ok bool, bad bool) {
 	}
 	return v, true, false
 }
+
+// pageParams is the single paging convention: page defaults to 1, limit
+// defaults to 20, and limit is capped at 200.
+//
+// The clamp has to happen here rather than being left to the service,
+// because the returned limit is echoed back in the Page envelope and the
+// client divides total by it to work out how many pages exist. Reporting a
+// limit the query did not actually apply makes every page count wrong from
+// the first page on - the caller sees limit=500 next to 20 rows and
+// computes a page count that does not exist.
+//
+// Out-of-range values fall back to 20 instead of a 400: a paging parameter
+// only decides "how many", it does not change the *scope* of what is
+// visible, so the caller still gets a correct slice of the right set. That
+// is the line ADR-010 draws for the 400 rule, which is reserved for filters
+// whose loss would widen the result set (see queryUint above).
+func pageParams(c *gin.Context) (page, limit int) {
+	page, _ = strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ = strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 200 {
+		limit = 20
+	}
+	return page, limit
+}

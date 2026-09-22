@@ -508,10 +508,26 @@ paths:
         `/dashboard/admin`（`frontend/src/pages/TodayPage.tsx:9-13` 的注释记录了那次绕行），
         而 LeadsPage 仍在直接调本端点，本轮把端点本身修掉。
 
-        **空集合契约**：无匹配时 `data` 恒为 `[]`，绝不返回 `null`。
+        **空集合契约**：无匹配时 `data.items` 恒为 `[]`，**绝不返回 `null`**（客户端 `.map()` 不得
+        因空集合崩溃）。空集合现在有两种来路，都必须落在 `items: []`：筛选无匹配，以及**页码越界**
+        （`page` 大于总页数，例如只有 2 页时请求 `page=99`）—— 后者同样返回 `has_more: false`。
+
+        **服务端分页**：`page` / `limit` 决定返回第几页（默认 `page=1`、`limit=20`，`limit` 上限
+        **200**，越界回落 20，见 `components/parameters/Limit`）。`total` 是**同一组谓词**下过滤集
+        的总行数，`items` 那一页与它出自同一个 `WHERE`（含下面的角色收口），所以 `total` 不会比
+        `items` 可见范围更宽。**`ORDER BY` 以唯一键 `t.id DESC` 收尾**（`scheduled_at` 不唯一，
+        seed 会成批写入同一挂钟时刻），因此翻页既不会漏行也不会重复行：把第 1 页与第 2 页的
+        `items[].id` 并起来去重，行数**恰好等于 `total`** —— 这也是手工验证清单里的验收断言。
+        此前本端点没有分页参数，尾部硬编码 `LIMIT 100`，超过 100 条会**静默截断**且调用方无从得知。
       parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
         - name: student_id
           in: query
+          description: |
+            按学生过滤。**非数字取值一律 `400 / code=40000`**（`"student_id 必须是数字"`），
+            不静默忽略。此前它被当字符串直接拼进 SQL，`?student_id=abc` 不报错、匹配不到任何行，
+            调用方会把「过滤没生效」读成「该学生没有试听」。
           schema: { type: integer, format: int64 }
         - name: outcome
           in: query
@@ -527,8 +543,19 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: array
-                        items: { $ref: '#/components/schemas/Trial' }
+                        allOf:
+                          - $ref: '#/components/schemas/PageMeta'
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                default: []
+                                items: { $ref: '#/components/schemas/Trial' }
+        '400':
+          description: "数字型 query 参数无法解析：code=40000，例如 \"student_id 必须是数字\""
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
     post:
       tags: [trials]
       summary: "安排试听（R1：同学生同科目只能试听一次）"
@@ -607,13 +634,27 @@ paths:
     get:
       tags: [followups]
       summary: 跟进任务列表
-      description: "**空集合契约**：无匹配时 `data` 恒为 `[]`，绝不返回 `null`。"
+      description: |
+        与 `GET /trials` 同页、同角色门、同口径：`admin` 只看到 `students.owner_admin_id = 自己`
+        的跟进（`handler/trial.go` 的 `ListFollowUps` 把 `cu.ID` 填进 `FollowUpFilter.OwnerAdminID`），
+        **没有任何 query 参数可以把它放宽** —— 同页还有 `GET /trials` 的收口说明可对照。
+
+        **空集合契约**：无匹配时 `data.items` 恒为 `[]`，**绝不返回 `null`**。
+
+        **服务端分页**：`page` / `limit` 生效，`limit` 上限 200，越界回落 20（见
+        `components/parameters/Limit`）。`total` 与 `items` 出自同一组谓词。
+        `status` 的 `overdue` 在读取时由 `due_at < now` 派生，不存库，所以跨过截止时间即刻为真。
       parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
         - name: status
           in: query
           schema: { type: string, enum: [pending, done, overdue] }
-        - name: owner_admin_id
+        - name: student_id
           in: query
+          description: |
+            按学生过滤，可选。**非数字取值一律 `400 / code=40000`**（`"student_id 必须是数字"`），
+            不静默忽略 —— `FollowUpFilter.StudentID` 是 `*uint64`，键缺席才是「不过滤」。
           schema: { type: integer, format: int64 }
       responses:
         '200':
@@ -626,9 +667,19 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: array
-                        default: []
-                        items: { $ref: '#/components/schemas/FollowUp' }
+                        allOf:
+                          - $ref: '#/components/schemas/PageMeta'
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                default: []
+                                items: { $ref: '#/components/schemas/FollowUp' }
+        '400':
+          description: "数字型 query 参数无法解析：code=40000，例如 \"student_id 必须是数字\""
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
 
   /follow-ups/{id}/complete:
     parameters: [{ $ref: '#/components/parameters/PathId' }]

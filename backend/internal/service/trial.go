@@ -128,7 +128,13 @@ func (s *TrialService) SetOutcome(db *gorm.DB, cfg *config.Config, trialID uint6
 type FollowUpFilter struct {
 	Status       string // pending | overdue | done
 	OwnerAdminID *uint64
-	Page, Limit  int
+	// StudentID narrows the queue to one student, which is what the leads
+	// page needs when it shows a single prospect's follow-ups. A pointer so
+	// that "no filter" and "student 0" cannot be confused - student ids
+	// start at 1, but relying on that would make the zero value silently
+	// mean two different things.
+	StudentID   *uint64
+	Page, Limit int
 }
 
 // ListFollowUps derives overdue at read time. Storing an overdue flag
@@ -158,6 +164,10 @@ func (s *TrialService) ListFollowUps(db *gorm.DB, f FollowUpFilter) ([]model.Fol
 	if f.OwnerAdminID != nil {
 		where = append(where, "s.owner_admin_id = ?")
 		args = append(args, *f.OwnerAdminID)
+	}
+	if f.StudentID != nil {
+		where = append(where, "fu.student_id = ?")
+		args = append(args, *f.StudentID)
 	}
 
 	var total int64

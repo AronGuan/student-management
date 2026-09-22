@@ -588,7 +588,7 @@ students 1──N ai_decisions
 
 **两条全局契约不变量**（客户端必须依赖，服务端必须保证）：
 
-1. **空集合恒为 `[]`，绝不返回 `null`**。`/classes`、`/classes/{id}/enrollments`、`/lessons`、`/follow-ups`、`/leave-requests` 的 `data` 与 `/students`、`/students/{id}/credits` 的 `data.items` 在无匹配时一律返回空数组。其中 `/students/{id}/credits` 最要紧——新学生无流水时曾返回 `items:null`，客户端 `.map()` 会崩。
+1. **空集合恒为 `[]`，绝不返回 `null`**。`/classes`、`/classes/{id}/enrollments`、`/lessons`、`/leave-requests` 的 `data` 与 `/students`、`/trials`、`/follow-ups`、`/students/{id}/credits` 的 `data.items` 在无匹配时一律返回空数组。其中 `/students/{id}/credits` 最要紧——新学生无流水时曾返回 `items:null`，客户端 `.map()` 会崩。分页端点的空集合有两条来路：筛选无匹配，以及**页码越界**（`page` 超过总页数），两者都必须是 `items: []` 而不是 `null`。
 2. **数字型 query 参数无法解析时返回 400，不静默忽略**。此前非法值被忽略导致过滤条件失效、整个结果集被返回；`GET /students?owner_admin_id=abc` 甚至返回过 `code:-1`（与兜底 500 撞码，客户端无法区分），现统一为 `400 / 40000`。
 
 ---
@@ -640,7 +640,8 @@ students 1──N ai_decisions
    - **`GET /students?owner_admin_id=abc` → `400 / 40000`**（不得再返回 `-1`）
    - **household 账号 `GET /students/{别家孩子}` 与 `/students/{别家孩子}/credits` → `403 / 40301`**
    - **household 账号 `GET /classes` 只应看到自己孩子 active 报名的班级**；`GET /classes/{id}/enrollments` 只应看到自己孩子在册行
-   - **空集合断言**：新学生 `GET /students/{id}/credits` 必须返回 `"items": []`（**不是 `null`**）；空查询的 `/classes`、`/lessons`、`/follow-ups`、`/leave-requests` 必须返回 `[]`
+   - **空集合断言**：新学生 `GET /students/{id}/credits` 必须返回 `"items": []`（**不是 `null`**）；空查询的 `/classes`、`/lessons`、`/leave-requests` 必须返回 `[]`；空查询的 `/students`、`/trials`、`/follow-ups` 必须返回 `"items": []`
+   - **分页断言**（`/students`、`/trials`、`/follow-ups` 同口径）：`?limit=20&page=1` 与 `page=2` 的 `items[].id` 并起来去重，行数必须**恰好等于 `total`**；`total` 必须等于「相同谓词直接查库的 `COUNT(*)`」（**含角色收口**——`total` 数的是调用者可见的那一批，不是全库）；越界页 `?page=99` 返回 `items: []` 且 `has_more: false`。第一条抓的是「`ORDER BY` 无唯一键 → 并列组跨页丢行/重行」，只比 `total` 抓不到
    - 断掉 `DEEPSEEK_API_KEY` 后请求决策卡 → HTTP 200 且 `ai_status='unavailable'`，主流程照常
 4. `npm run lint`（含 emoji / hex / 图标库三条检查）通过；`go build ./...` 通过。
 

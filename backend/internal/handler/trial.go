@@ -1,8 +1,6 @@
 package handler
 
 import (
-	"strconv"
-
 	"github.com/gin-gonic/gin"
 
 	"sms/internal/config"
@@ -17,25 +15,36 @@ type TrialHandler struct {
 }
 
 func (h *TrialHandler) List(c *gin.Context) {
-	// Initialised, not declared nil: with the ownership scoping below an
-	// empty result is now a normal event (a consultant with no trials of
-	// their own), and a nil slice would serialise as `data: null` instead
-	// of `data: []`. Same reason service/trial.go does this for
-	// follow-ups; the project rule is that a list endpoint never emits null.
-	rows := []model.Trial{}
-	q := `SELECT t.*, s.full_name AS student_name, sub.name AS subject_name, u.display_name AS teacher_name
-		FROM trials t
-		JOIN students s ON s.id = t.student_id
-		LEFT JOIN subjects sub ON sub.id = t.subject_id
-		LEFT JOIN users u ON u.id = t.teacher_id
-		WHERE 1=1`
+	page, limit := pageParams(c)
+
+	// student_id goes through queryUint instead of being interpolated as a
+	// raw query string. As a string it was handed to the driver as text,
+	// so `?student_id=abc` matched nothing and returned an empty page with
+	// no error - the caller reads that as "this student has no trials"
+	// while the filter was never really applied. Every other numeric query
+	// parameter in the project answers 400 / 40000 instead
+	// (ARCHITECTURE.md:592); queryUint has already written that response,
+	// so this returns immediately.
+	studentID, hasStudent, bad := queryUint(c, "student_id")
+	if bad {
+		return
+	}
+
+	// The WHERE clause is assembled exactly once and shared by the COUNT
+	// and the page query below. Writing it twice is how `total` starts
+	// describing a different set than `items`: the role scoping in
+	// particular is a *visibility* rule, so a COUNT that omitted it would
+	// advertise the company-wide row count while handing back one
+	// consultant's rows, and the client's page count would be inflated by
+	// rows the caller is not allowed to see.
+	where := " WHERE 1=1"
 	args := []interface{}{}
-	if v := c.Query("student_id"); v != "" {
-		q += " AND t.student_id = ?"
-		args = append(args, v)
+	if hasStudent {
+		where += " AND t.student_id = ?"
+		args = append(args, studentID)
 	}
 	if v := c.Query("outcome"); v != "" {
-		q += " AND t.outcome = ?"
+		where += " AND t.outcome = ?"
 		args = append(args, v)
 	}
 	// /trials is a consultant's personal work queue, not the student
@@ -57,19 +66,54 @@ func (h *TrialHandler) List(c *gin.Context) {
 	if cu != nil {
 		switch cu.Role {
 		case model.RoleAdmin:
-			q += " AND s.owner_admin_id = ?"
+			where += " AND s.owner_admin_id = ?"
 			args = append(args, cu.ID)
 		case model.RoleTeacher:
-			q += " AND t.teacher_id = ?"
+			where += " AND t.teacher_id = ?"
 			args = append(args, cu.ID)
 		}
 	}
-	q += " ORDER BY t.scheduled_at DESC LIMIT 100"
-	if err := DB.Raw(q, args...).Scan(&rows).Error; err != nil {
+
+	// No ORDER BY and no LIMIT here on purpose: total is a property of the
+	// filtered set, and the two clauses would only make it slower to
+	// compute and easier to get wrong.
+	var total int64
+	if err := DB.Raw(`SELECT COUNT(*)
+		FROM trials t
+		JOIN students s ON s.id = t.student_id`+where, args...).Scan(&total).Error; err != nil {
 		Fail(c, err)
 		return
 	}
-	OK(c, rows)
+
+	// Initialised, not declared nil: with the ownership scoping above an
+	// empty page is a normal event (a consultant with no trials of their
+	// own, or a page past the end), and a nil slice would serialise as
+	// `data.items: null` instead of `[]`. Same reason service/trial.go does
+	// this for follow-ups; the project rule is that a list endpoint never
+	// emits null.
+	rows := []model.Trial{}
+	// The paging arguments go into a copy so that `args` keeps meaning "the
+	// WHERE arguments" for the rest of the function, instead of turning into
+	// a mix of filter and paging values that only lines up with one
+	// statement's placeholder order.
+	listArgs := append(append([]interface{}{}, args...), limit, (page-1)*limit)
+	// t.id DESC is not decoration. scheduled_at is not unique - the seed
+	// writes whole batches at identical wall-clock slots - and under
+	// LIMIT/OFFSET a non-unique sort key makes the pages overlap and miss
+	// rows: page 1 and page 2 then hold "different sets of rows" rather
+	// than "the same rows in a different order", so concatenating the pages
+	// neither covers total nor stays distinct. /students already lost five
+	// rows this way once; the tie-breaker closes it here.
+	if err := DB.Raw(`SELECT t.*, s.full_name AS student_name, sub.name AS subject_name, u.display_name AS teacher_name
+		FROM trials t
+		JOIN students s ON s.id = t.student_id
+		LEFT JOIN subjects sub ON sub.id = t.subject_id
+		LEFT JOIN users u ON u.id = t.teacher_id`+where+`
+		ORDER BY t.scheduled_at DESC, t.id DESC LIMIT ? OFFSET ?`, listArgs...).Scan(&rows).Error; err != nil {
+		Fail(c, err)
+		return
+	}
+	OK(c, Page{Items: rows, Total: total, Page: page, Limit: limit, HasMore: int64(page*limit) < total})
 }
 
 func (h *TrialHandler) Create(c *gin.Context) {
@@ -117,12 +161,22 @@ func (h *TrialHandler) SetOutcome(c *gin.Context) {
 }
 
 func (h *TrialHandler) ListFollowUps(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	// pageParams, not a bare Atoi: the old code echoed whatever limit the
+	// caller sent while the service clamped it internally, so `?limit=500`
+	// answered `limit:500` and returned 20 rows. The client then computed
+	// pages from a limit the query never used.
+	page, limit := pageParams(c)
+	studentID, hasStudent, bad := queryUint(c, "student_id")
+	if bad {
+		return
+	}
 	f := service.FollowUpFilter{
 		Status: c.Query("status"),
 		Page:   page,
 		Limit:  limit,
+	}
+	if hasStudent {
+		f.StudentID = &studentID
 	}
 	cu := middleware.Current(c)
 	if cu.Role == model.RoleAdmin {
