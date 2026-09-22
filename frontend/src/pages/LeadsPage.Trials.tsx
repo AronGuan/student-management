@@ -94,12 +94,14 @@ export default function LeadsTrials({
                         {isOpen ? <ChevronDown size={16} aria-hidden /> : <ChevronRight size={16} aria-hidden />}
                         记录结果
                       </Button>
-                    ) : (
+                    ) : trial.outcome === 'lost' ? (
+                      // 只有「未转化」才给转化方案：已转化的家庭已经答应了，再推一份说服方案
+                      // 是自相矛盾的；而未转化的正是要挽回的那一批。
                       <Button variant="secondary" size="sm" onClick={() => onSelect(trial)}>
                         <Sparkles size={16} aria-hidden />
                         转化方案
                       </Button>
-                    )}
+                    ) : null}
                   </span>
                 </div>
 
