@@ -1,0 +1,9 @@
+# Shell scripts must keep LF endings regardless of the machine that commits them.
+# The working copy has core.autocrlf=true, so a script committed from Windows
+# would otherwise reach the Linux server as CRLF and die on the shebang with
+# "bad interpreter: /usr/bin/env bash^M" - a failure whose message points at bash
+# rather than at line endings.
+*.sh text eol=lf
+
+# Same reasoning for anything else that gets executed or parsed on the server.
+*.bash text eol=lf
