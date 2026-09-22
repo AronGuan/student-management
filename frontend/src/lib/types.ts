@@ -123,11 +123,11 @@ export interface Enrollment {
   class_name: string;
   /**
    * 约定 B：`EnrollmentRow.SubjectName` 是裸 string、无 omitempty
-   * （service/student_detail.go:46），LEFT JOIN 落空时是 `""` 而**不是** null。
+   * （service/student_detail.go:51），LEFT JOIN 落空时是 `""` 而**不是** null。
    * 消费侧必须用 `||` 兜底，用 `??` 会静默失效。
    */
   subject_name: string;
-  /** 约定 B，同 subject_name（service/student_detail.go:47）。 */
+  /** 约定 B，同 subject_name（service/student_detail.go:52）。 */
   teacher_name: string;
   weekday: number;
   start_min: number;
@@ -153,6 +153,50 @@ export interface FollowUp {
   completed_at?: string;
   completed_by_user_id?: number;
   note?: string;
+}
+
+/**
+ * `GET /students/:id` 里的 `recent_feedback[]` —— **老师手写的评价原文**。
+ *
+ * 与 `follow_ups.note`（顾问的跟进备注）不是一回事：那个是顾问给自己/同事留的待办说明，
+ * 这个出自点名页备注列，写的人是在课堂上的老师，说的是孩子最近怎么样。学生抽屉把两者
+ * 分开渲染，AI 续费卡读的也是这一份（service/ai.go:282-298 —— 含 Go 侧那道
+ * teacherFeedback 过滤，它才是真正拦下系统样板文字的一层）。
+ *
+ * 只有一个读者：顾问的学生抽屉（StudentsPage.Drawer.tsx）。家庭端的 /me **不读这一份** ——
+ * 老师写给同事的课堂口气不该给家长看，家长读的是另一份 `parent_updates`（见下）。
+ *
+ * 服务端已经剥掉了 `late leave:` / `corrected from` 这类系统样板文字，所以 note 里剩下的
+ * 就是老师原话。上限 10 条、按 recorded_at 倒序 —— 取的是"最近怎么样"，不是全量历史。
+ */
+export interface FeedbackRow {
+  id: number;
+  lesson_date: string; // "2026-09-16"
+  class_name: string;
+  subject_name: string;
+  teacher_name: string;
+  status: string; // present | late | absent | leave_approved | leave_late
+  note: string; // 老师原话，系统生成的文本服务端已剥除
+  recorded_at: string; // RFC3339
+}
+
+/**
+ * `GET /students/:id` 里的 `parent_updates[]` —— **顾问写给这个家庭的、家长真的会读到的那句话**。
+ *
+ * 它和 `recent_feedback` 是两份不同的数据，不是一份数据的两个视图：
+ * `recent_feedback` 出自点名页备注列，是老师写给同事的课堂记录（口气糙、可以很直接），
+ * 只给 AI 和顾问看；这一份来自顾问处理完一次跟进之后亲手写下的话，家长在自己的页面上读它。
+ * 两者之间**没有任何派生关系** —— 不做"自动脱敏"、不做"自动摘要"，理由是：漏一条等于机构
+ * 少说了一句，而"忘了说"和"没什么可说"必须能被区分开（后者就是这一条不存在）。
+ *
+ * 服务端只下发给家长看过的那份（`follow_ups.parent_note` 非空），上限 10 条、
+ * 按 `parent_note_at` 倒序 —— 取的是"最近一次同步是什么时候"。
+ */
+export interface ParentUpdateRow {
+  id: number;
+  note: string; // 顾问写给这个家庭的那句话，服务端保证非空
+  speaker_name: string; // 谁同步的（顾问），可能为空串
+  recorded_at: string; // RFC3339
 }
 
 export type AttendanceStatus =
@@ -210,6 +254,10 @@ export interface StudentDetail extends Student {
   enrollments: Enrollment[];
   packages: CreditPackage[];
   follow_ups: FollowUp[];
+  /** 老师手写的评价原文（上限 10 条、按 recorded_at 倒序），见 FeedbackRow。 */
+  recent_feedback: FeedbackRow[];
+  /** 顾问写给家长、家长在 /me 上真能读到的话，见 ParentUpdateRow。 */
+  parent_updates: ParentUpdateRow[];
   latest_ai_card: AiDecisionCard | null;
 }
 
@@ -291,6 +339,8 @@ export interface RosterEntry {
   current_status: AttendanceStatus | null;
   source: 'prefilled' | 'teacher_override' | 'system' | null;
   balance: number;
+  /** 老师填的自由备注；未点名时为 null */
+  note: string | null;
 }
 
 export interface Roster {
@@ -324,7 +374,7 @@ export interface LeaveRequest {
 /**
  * 工作台队列行 —— 逾期跟进。服务端只算逾期小时数，展示文案归前端。
  *
- * `overdue_hours` 来自 dashboard 的 `followUpRow`（dashboard.go:36）：`int64` 非指针、**无** `omitempty`，
+ * `overdue_hours` 来自 dashboard 的 `followUpRow`（dashboard.go:38）：`int64` 非指针、**无** `omitempty`，
  * 且 SQL 已按 `WHERE fu.due_at < now` 预过滤 —— **键恒在、值恒为正**（正 = 已逾期小时数）。
  * 别和 `/follow-ups` 的 `model.FollowUp.overdue_hours` 混：那个是 `*int64 + omitempty`，
  * 且**只有「仍是 pending 且已过 due_at」的行才有键**（未到期的 pending 行同样整个键缺席），
@@ -338,6 +388,26 @@ export interface FollowUpQueueRow {
   overdue_hours: number;
 }
 
+/**
+ * 工作台队列行 —— 「课堂记录标记」（`AdminDashboard.flagged_follow_ups`，来源
+ * `source='teacher_note'`）：老师在点名页勾了「需要顾问跟进」而顾问还没处理完的项。
+ *
+ * 与 `FollowUpQueueRow` 只差一个字段，却是**必须分开的两个类型**，不是重复定义：
+ * 上面的注释把 `0` 定死成「已逾期但不足 1 小时」（`FollowUp.overdue_hours` 的第 2 条也这么
+ * 写：「`0` 表示已逾期但不足 1 小时，不是未到期」），而这一队列的行按定义**还没到期**
+ * （`due_at = 标记时刻 + 48h`）。复用同一个类型，服务端只能给出一个 `0` ——
+ * 于是「还没到期」会被渲染成「已逾期 0 小时」；改给负数又把这个字段的值域从 `[0, +∞)`
+ * 偷偷放宽到 `(-∞, +∞)`，一个端点上的谎话会顺着共用渲染漂到另一个端点。
+ * 所以这里干脆不带这个字段：要显示「还剩多久」就按 `due_at` 本地倒计时 —— 与服务端在
+ * `GET /follow-ups` 上对未逾期行（同样不下发这个键）的做法完全一致。
+ */
+export interface FlaggedFollowUpRow {
+  id: number;
+  student_id: number;
+  student_name: string;
+  due_at: string;
+}
+
 export interface TrialQueueRow {
   id: number;
   student_id: number;
@@ -345,6 +415,12 @@ export interface TrialQueueRow {
   subject_name: string | null;
   teacher_name: string | null;
   scheduled_at: string;
+  /**
+   * 试听时长（分钟）。服务端下发的是**原始分钟数**，不是派生出来的结束时刻或「已结束」
+   * 布尔 ——「结束没有」是渲染那一刻的问题（同一行今天看是「未结束」、明天看是「已结束」），
+   * 多下发一个派生字段只会让两处口径各自漂移。前端用 hoursSinceEnd(scheduled_at, duration_min) 算。
+   */
+  duration_min: number;
   outcome: 'pending' | 'converted' | 'lost';
 }
 
@@ -364,14 +440,45 @@ export interface LowCreditRow {
 }
 
 export interface AdminDashboard {
-  /** admin 首屏的三条行动队列 —— 工作台就是靠这三个数组撑起来的。 */
+  /** admin 首屏的行动队列 —— 工作台就是靠这五个数组撑起来的。 */
   overdue_follow_ups: FollowUpQueueRow[];
+  /**
+   * 「课堂记录标记」：老师在点名页勾了「需要顾问跟进」、顾问还没处理完的项，按 due_at 升序，
+   * 上限 20。与 overdue_follow_ups **不重叠**：两条队列按 `source`（trial / teacher_note）
+   * 恰好切分「未完成的跟进」，不重不漏 —— 这不是靠数据现状成立的说法，课堂标记一旦逾期
+   * 就会同时满足逾期区的其他条件，只有按 source 切开才不会两头都出现或两头都不出现。
+   *
+   * 与逾期区还有两处刻意的不同：**不按是否逾期过滤**（逾期的行留在这里，甩进逾期区等于让
+   * 这条任务凭空消失 —— 那边按 source 只收试听转化，而且它当前在界面上是隐藏的）；
+   * 行里没有 `overdue_hours`（为什么，见 FlaggedFollowUpRow）。
+   * 展示的措辞由前端从 `due_at` 本地倒计时，服务端不替它算差值。
+   */
+  flagged_follow_ups: FlaggedFollowUpRow[];
+  /** **未来**的试听（scheduled_at >= now），按开始时刻升序。 */
   upcoming_trials: TrialQueueRow[];
+  /**
+   * **已上完但结果还没记**的试听：outcome='pending' 且 结束时刻 <= now，按结束时刻升序
+   * （结束最久的排最前）。它与 upcoming_trials 是同一条时间轴上的两段，互不重叠，
+   * 判据的边界都落在 `scheduled_at + COALESCE(duration_min, 60) <= now` 这一刻。
+   * 数组上限 20，全量计数另见 awaiting_outcome_trials_count。
+   */
+  awaiting_outcome_trials: TrialQueueRow[];
   low_credit: LowCreditRow[];
   today_lessons: number;
   pending_followups: number;
   overdue_followups: number;
+  /**
+   * flagged_follow_ups 同口径的**全量**计数（`source='teacher_note' AND status='pending'`，
+   * 含已逾期），与数组长度不一定相等（数组上限 20）。标题上的数字用这个，且必须与数组同一个
+   * 谓词：否则标题说 5 条、列表只画 3 条，而看的人只会以为列表漏了。
+   */
+  flagged_followups: number;
   low_credit_students: number;
+  /**
+   * awaiting_outcome_trials 同口径的**全量**计数，与数组长度不一定相等（数组有上限 20）。
+   * 标题上的数字用这个：积压时拿数组长度当计数会低报，而积压恰恰是这一区要暴露的事。
+   */
+  awaiting_outcome_trials_count: number;
 }
 
 export interface TeacherLessonRow {

@@ -185,3 +185,58 @@ export function hoursUntil(iso: string, now = Date.now()): number {
   if (t === null) return 0;
   return Math.round((t - now) / 3_600_000);
 }
+
+/**
+ * 从某个时间串到现在经过的**整天数**（向下取整）。无法解析时返回 null。
+ *
+ * 走 wallClock 解析成绝对时刻再相减，与 slaCountdown / hoursUntil 同一口径：服务端下发的
+ * 串自带墨尔本偏移，parse 出来就是绝对时刻，所以这里不需要知道「墨尔本现在几点」——
+ * 这正是本文件开头那条「只截取、不换算」规则允许的用法。
+ *
+ * 反过来做——把日期串截成 "2026-09-10" 再和今天的日期串比较——会在跨时区时整整差一天，
+ * 正是本仓禁止的那类换算。
+ *
+ * floor 而非 round：晾了 23 小时是「今天录入」，不是「已晾 1 天」。
+ * max(0, …) 兜住服务端时钟略快于浏览器（或 created_at 是将来时刻）造成的负数。
+ */
+export function daysSince(iso: string | null | undefined, now = Date.now()): number | null {
+  const t = wallClock(iso);
+  if (t === null) return null;
+  return Math.max(0, Math.floor((now - t) / 86_400_000));
+}
+
+/**
+ * 一节课（开始时刻 + 时长）**结束**到现在经过的小时数。还没下课就是负数，无法解析返回 null。
+ *
+ * 与 daysSince / hoursUntil 同一口径：先把服务端下发的带偏移串经 wallClock 解析成绝对
+ * 时刻，再相减。前端自己拼 scheduled_at + duration_min 是允许的，因为两者都是绝对量；
+ * 不被允许的是把日期串截成 "2026-09-22" 再和「今天」比 —— 那是换算。
+ *
+ * 不取整：调用方要区分「刚刚结束」（<1h）和「已结束 N 小时」，取整会把前者抹成 0。
+ */
+export function hoursSinceEnd(
+  startIso: string | null | undefined,
+  durationMin: number,
+  now = Date.now(),
+): number | null {
+  const t = wallClock(startIso);
+  if (t === null) return null;
+  return (now - (t + durationMin * 60_000)) / 3_600_000;
+}
+
+/**
+ * 「试听已经结束多久」的文案 —— 只给「待记录结果」档里**已经下课、结果还没记**的行用。
+ *
+ * 刻意不借用 overdueLabel 的「逾期」二字：逾期是 48h 跟进任务的词（slaCountdown 与
+ * overdueLabel 都服务于那条钟），试听本身没有 SLA。两个钟共用一个词，读的人会把
+ * 「还没试听」和「试听完没记」混成同一件事 —— 这恰恰是这一档今天最容易被读反的地方。
+ *
+ * 负数（还没下课）返回 null，让调用方决定什么都不渲染 —— 未开始和正在试听的行不需要
+ * 任何标记，给它们贴一个「还没结束」只是往表里加噪音。
+ */
+export function endedAgoLabel(hours: number | null | undefined): string | null {
+  if (hours === null || hours === undefined || hours < 0) return null;
+  if (hours < 1) return '刚刚结束';
+  if (hours < 24) return `已结束 ${Math.max(1, Math.round(hours))} 小时`;
+  return `已结束 ${Math.floor(hours / 24)} 天`;
+}

@@ -5,7 +5,9 @@ import { humaniseError } from '../lib/api';
 
 /**
  * 列表三态：loading / empty / error。
- * UIUX.md §8：骨架屏列宽行高与真实数据一致；空态必须带 1 个 CTA；错误不整页报错。
+ * UIUX.md §8 的组件状态矩阵 + §2 参考表（Height / Plane）：骨架屏列宽行高与真实数据一致；
+ * 错误不整页报错；空态必须给出**下一步**，通常是一个 CTA，但系统里确实没有可去的地方时
+ * 说明文案就是下一步 —— 因此 `emptyCta` 是**可选**的，不要为了凑一个按钮而指向不存在的页面。
  */
 
 export function SkeletonRows({ rows = 4, cols = 4 }: { rows?: number; cols?: number }) {
@@ -32,7 +34,8 @@ export function EmptyState({
   onCta,
 }: {
   message: string;
-  ctaLabel: string;
+  /** 可选 —— 没有可去的地方时不给，这个空态就只留说明文案（见文件头对 UIUX.md §2 的引用） */
+  ctaLabel?: string;
   onCta?: () => void;
 }) {
   return (
@@ -41,7 +44,7 @@ export function EmptyState({
         <Inbox size={24} strokeWidth={1.75} aria-hidden />
         <p className="text-body">{message}</p>
       </div>
-      {onCta && (
+      {onCta && ctaLabel && (
         <Button variant="secondary" size="sm" onClick={onCta}>
           {ctaLabel}
         </Button>
@@ -96,7 +99,11 @@ export function ListState({
   error: unknown;
   isEmpty: boolean;
   emptyMessage: string;
-  emptyCta: string;
+  /**
+   * 空态的下一步动作文案。**可选**：系统里确实没有可去的地方时不给，这一屏就只留
+   * emptyMessage（见文件头 —— 不要为了凑一个按钮而指向不存在的页面）。
+   */
+  emptyCta?: string;
   onEmptyCta?: () => void;
   onRetry?: () => void;
   rows?: number;
