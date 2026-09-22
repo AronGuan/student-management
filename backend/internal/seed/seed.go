@@ -210,6 +210,24 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 
 		// ---- packages + opening ledger entries ----
 		for i, s := range students {
+			// No package before the family has bought in: a lead has not
+			// even trialled yet and a trial-stage student is still trying,
+			// so neither has paid anything. Packaging them paints a
+			// prospect as a paying customer in three places at once - the
+			// balance column, the R6 renewal queue and the class roster.
+			//
+			// 'churned' is deliberately left alone: those families did pay,
+			// and their packages, ledger and attendance are history that
+			// has to stay true.
+			//
+			// i%4 stays on the loop index rather than on a count of the
+			// students who survive the filter, so everyone keeps the package
+			// size their position has always produced. A filtered counter
+			// would shift every size after the first skip, which is a change
+			// nobody asked for and nothing would report.
+			if s.Status == model.StudentLead || s.Status == model.StudentTrial {
+				continue
+			}
 			pkgSize := []int{20, 40, 40, 60}[i%4]
 			p := &model.CreditPackage{
 				StudentID: s.ID,
@@ -271,6 +289,14 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 		for si, s := range students {
 			if si%7 == 3 {
 				continue // some students are not yet placed
+			}
+			// No package, no timetable: a student who has not bought in is
+			// not enrolled in a weekly class. A trial runs through the
+			// trials table, not through the class roster, so a lead or a
+			// trial-stage student here would sit on a roster for lessons
+			// nobody has agreed to pay for.
+			if s.Status == model.StudentLead || s.Status == model.StudentTrial {
+				continue
 			}
 			// two classes for some students, to prove a student may be in
 			// more than one class as long as the times differ
@@ -752,6 +778,16 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 		// constructed deliberately.
 		for i, s := range students {
 			if i%6 != 0 {
+				continue
+			}
+			// Drain 'active' students only. Both reportStates below and
+			// /students?low_credit=1 define this queue as status='active',
+			// so draining a lead or a trial-stage student is precisely what
+			// made those two numbers disagree - the inconsistency this
+			// change exists to remove. It is also self-guarding in the
+			// other direction: a student with no package sums to 0, which
+			// the next check skips, so nobody is ever drained below zero.
+			if s.Status != model.StudentActive {
 				continue
 			}
 			var bal int
