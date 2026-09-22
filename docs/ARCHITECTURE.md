@@ -83,8 +83,8 @@ MySQL 8（阿里云 `39.102.63.30:3306`）。
 | 决策点 | 结论 |
 |---|---|
 | 算法 | **HS256**（单服务、单密钥；RS256 在本项目没有多方验签需求，只增加配置负担） |
-| 密钥 | 环境变量 `APP_JWT_SECRET`，长度 >= 32 字节随机串；启动时校验缺失即 panic。**不进仓库**（`.env.example` 只放占位） |
-| Claims | `sub`(user_id) `role`(admin/teacher/student) `name` `sid`(学生账号绑定的 student_id，可为空) `iat` `exp` `jti` |
+| 密钥 | 环境变量 **`JWT_SECRET`**（`config/config.go:24`、`:45`），**有默认值 `dev-only-secret-change-me`**，启动**既不校验长度也不 panic**。`.env.example` 只放占位、`.env` 不进仓库，生产由 systemd 显式注入（见 §8）。ADR-003 当初写的「缺失即 panic」**从未实现** |
+| Claims | `sub`(**username**，`middleware/auth.go:49`) `uid`(user_id，自定义字段，不在 JWT 标准集里) `role` `name` `iat` `exp`。**没有 `sid`**；`jti` 从未填充（`RegisteredClaims.ID` 留空 ⇒ 整键缺席） |
 | TTL | **Access Token 8 小时**（一个工作日），**MVP 不实现 refresh token**（明确降级，见 ADR-003） |
 | 传递方式 | **双通道**：浏览器走 httpOnly Cookie `ae_token`（SameSite=Lax，生产加 Secure；Vite dev 用 `server.proxy` 把 `/api` 代理到 `127.0.0.1:8080` 保证同源）；curl / Postman 走 `Authorization: Bearer <token>` |
 | CSRF | `SameSite=Lax` 的 httpOnly Cookie（跨站表单提交带不上凭据）+ CORS 只放行 Vite 两个源（`handler/router.go:39-46`）。**没有独立的 Origin 校验中间件**：跨站读取由 CORS 阻断，跨站写入由 SameSite 阻断 |
@@ -174,7 +174,7 @@ MySQL 8（阿里云 `39.102.63.30:3306`）。
 ```
 ┌───────────────────────── 浏览器 (Vite dev / Nginx prod) ─────────────────────────┐
 │ React 19 SPA                                                                     │
-│  routes → features/*（页面容器）→ api/*（TanStack Query hooks + openapi 类型）      │
+│  routes → src/pages/*（页面容器）→ src/lib/api.ts（fetch 封装 + openapi 类型）      │
 │  components/ui/*（自建，只吃 tokens）  lucide-react（唯一图标源）                  │
 └───────────────────────────────────┬──────────────────────────────────────────────┘
                                     │ /api/v1  (同源：Vite proxy 或 Nginx 反代)
@@ -182,10 +182,10 @@ MySQL 8（阿里云 `39.102.63.30:3306`）。
 │ Go + Gin                                                                          │
 │  middleware: AuthRequired(JWT) → RequireRoles（R7 在 service 层，不在链上）        │
 │  handler  : 只做 解析参数 / 绑定校验 / 调 service / 装响应。不含任何业务规则          │
-│  service  : 【R1-R8 唯一落地处】编排事务、调 repository、调 llm                      │
-│  repository: GORM 常规 CRUD + 关键路径手写 SQL（见 §5/§6）                          │
+│  service  : 【R1-R8 唯一落地处】编排事务、直接读写库、调 llm                         │
+│  repo     : 连接池 / DB 句柄（CRUD 与手写 SQL 直接写在 service）                    │
 │  llm      : DeepSeek 客户端 + 结构化校验 + 降级                                     │
-│  domain   : 实体/枚举/规则常量，零外部依赖                                          │
+│  model    : 实体 / 枚举 / 生命周期常量（GORM 标签直接写在结构体上）                 │
 └───────────────────────────────────┬──────────────────────────────────────────────┘
                                     │ go-sql-driver  parseTime=true&loc=Australia%2FMelbourne
 ┌───────────────────────────────────▼──────────────────────────────────────────────┐
@@ -195,7 +195,7 @@ MySQL 8（阿里云 `39.102.63.30:3306`）。
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**依赖方向单向**：`handler → service → repository → domain`。`domain` 不 import 任何上层；`service` 不 import `gin`；`repository` 不 import `handler`。
+**依赖方向单向**：`handler → service → model`（`apierr` / `clock` 是叶子工具包）。`service` 不 import `gin`。**没有独立的 `repository` 层、也没有零外部依赖的 `domain` 包**：实体 / 枚举 / 生命周期常量都在 `internal/model`，GORM CRUD 与手写 SQL 直接写在 `service`（少数列表查询在 handler，见 `handler/trial.go`）。
 
 ### 3.1 目录结构（可执行约束）
 
@@ -615,7 +615,7 @@ students 1──N ai_decisions
 
 - 前端 `npm run build` → `frontend/dist`，Nginx `root` 指向它，`try_files $uri /index.html`（SPA 回退）。
 - Nginx `location /api/ { proxy_pass http://127.0.0.1:8080; proxy_set_header Host $host; ... }`。
-- Go 编译：`CGO_ENABLED=0 go build -o /opt/ae/ae-api ./cmd/server`，systemd 托管，`Environment=APP_JWT_SECRET=...`、`Environment=DSN=...`（env 文件不进仓库）。
+- Go 编译：`CGO_ENABLED=0 go build -o /opt/ae/ae-api ./cmd/server`，systemd 托管，`Environment=JWT_SECRET=...`、`Environment=DB_DSN=...`（变量名以 `config/config.go` 为准；env 文件不进仓库）。
 - 建库与账号：`CREATE DATABASE student_management CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`；建专用 app 账号 `ae_app`（全库 SELECT/INSERT/UPDATE/DELETE，`credit_ledger` 收回 UPDATE/DELETE）。语句见 ADR-002。
 - 迁移：`migrate -path backend/migrations -database "mysql://<admin>@tcp(39.102.63.30:3306)/student_management" up`（发布前置步骤，**用管理账号**，与应用启动解耦；迁移完成后才对 `credit_ledger` 收权）。
 - 开发态：Vite `server.proxy` 把 `/api` 代理到 `127.0.0.1:8080`，保证 Cookie 同源。
