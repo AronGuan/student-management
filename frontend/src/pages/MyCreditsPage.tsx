@@ -3,7 +3,14 @@
  *
  * 它回答的是整个系统最贵的一句话：「我的课时怎么又少了」。
  * 所以顺序是固定的：余额（大字 + 进度条）→ 购买记录 → 全量流水（每一行都写清为什么变）
- * → 选课与请假。流水不折叠、不省略，家长能自己核对每一笔。
+ * → 课堂反馈 → 选课与请假。流水不折叠、不省略，家长能自己核对每一笔。
+ *
+ * 课堂反馈排在流水之后、选课与请假之前：它不属于课时账本（这个页面回答的"课时怎么又少了"
+ * 在流水那一块就答完了），但它必须在这里——这是家庭账号唯一能打开的页面。流水说"课时花在
+ * 哪了"，课堂反馈说"花得怎么样"，两句挨着读最顺；而选课与请假是一组动作，仍然收在页尾。
+ *
+ * 课堂反馈读的是 `parent_updates`（顾问写给这个家庭的那句话），**不是**老师说给同事听的课堂
+ * 记录 —— 那是两份数据，不互相派生。理由见 `MyCreditsPage.Feedback.tsx` 的文件头。
  *
  * 余额条的分母用的是 ledger 里 purchase 的累计，并在界面上标明口径 —— 后端没有
  * 「列出某学生课时包」的接口，所以不假装它是套餐总量。
@@ -16,6 +23,7 @@ import { useAuth } from '../lib/auth';
 import { Panel, PanelHeader, Select } from '../components/ui';
 import { CreditMeter } from '../components/CreditCell';
 import { EmptyState, ErrorState, ListState, SkeletonRows } from '../components/StateViews';
+import MyCreditsFeedback from './MyCreditsPage.Feedback';
 import MyCreditsLeave from './MyCreditsPage.Leave';
 import { REASON_LABEL, normaliseCredits, purchasedTotal, purchases } from './MyCreditsPage.Shared';
 import type { CreditsResponse, LedgerRow } from './MyCreditsPage.Shared';
@@ -229,6 +237,8 @@ export default function MyCreditsPage() {
           </div>
         </ListState>
       </Panel>
+
+      {studentId !== null && <MyCreditsFeedback studentId={studentId} />}
 
       {studentId !== null && (
         <MyCreditsLeave

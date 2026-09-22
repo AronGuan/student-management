@@ -1,17 +1,27 @@
 /**
  * 学生档案抽屉（右侧滑出，不跳页）。
  *
- * 一次请求：GET /students/:id 返回 StudentDetail —— 档案行 + guardians + enrollments +
- * packages + follow_ups + latest_ai_card（service/student_detail.go:62）。此前为了在班列表
- * 得打 1 次 /classes 再对每个班打一次名册，是 N+1；现在这些都在同一个响应里。
+ * 一次请求：GET /students/:id 返回 StudentDetail（service/student_detail.go:18）—— 档案行 +
+ * guardians + enrollments + packages + follow_ups + recent_feedback + parent_updates +
+ * latest_ai_card。此前为了在班列表得打 1 次 /classes 再对每个班打一次名册，是 N+1；
+ * 现在这些都在同一个响应里。
  *
- * 抽屉渲染三块：档案要点 + 监护人、课时（在 StudentsPage.Credits 里自取）、在班列表。
+ * 抽屉渲染六块（自上而下）：档案、家长、课堂记录、已同步给家长、课时（在 StudentsPage.Credits
+ * 里自取）、班级。
+ *
+ * 「课堂记录」与「已同步给家长」是**两份数据并排放**，不是一份数据的两个视图：
+ *   前者 = recent_feedback，老师写给同事的课堂记录（口气糙、可以很直接），只给顾问和 AI 用；
+ *   后者 = parent_updates，顾问消化过、愿意署上自己名字、家长在 /me 上真能读到的话。
+ * 并排的理由：顾问要能一眼看出"这次出了事，到底跟家里说了没有" —— 上面有、下面没有，
+ * 就是一条还没交代的事。两块都紧挨着课时放：续费判断本来就是「课时快用完」+「孩子最近怎么样」
+ * 两件事合起来看的，挨着钱那一块，顾问一眼能把两者对上。
+ *
  * can_write 是服务端算好的 R7 结论（handler/student.go:98-100），写入动作的启停只看它一个布尔，
  * 前端不自己比较 owner_admin_id。
  */
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
-import { CalendarDays, CircleSlash, LockKeyhole, UserRound, Users } from 'lucide-react';
+import { CalendarDays, CircleSlash, LockKeyhole, MessageSquareQuote, UserRound, Users } from 'lucide-react';
 import { Drawer } from '../components/Drawer';
 import { KeyValue, Panel } from '../components/ui';
 import { EmptyState, ErrorState, SkeletonRows } from '../components/StateViews';
@@ -45,6 +55,8 @@ export function StudentDrawer({
   const canWrite = row?.can_write === true;
   const guardians = row?.guardians ?? [];
   const enrolments = row?.enrollments ?? [];
+  const feedback = row?.recent_feedback ?? [];
+  const parentUpdates = row?.parent_updates ?? [];
   const subtitle = [row?.preferred_name, row?.year_level, row ? STUDENT_STATUS[row.status]?.label : null]
     .filter(Boolean)
     .join(' · ');
@@ -116,6 +128,66 @@ export function StudentDrawer({
                     <span className="flex shrink-0 flex-col items-end gap-0.5 text-meta">
                       <span className="num text-fg-2">{guardian.phone || '无电话'}</span>
                       <span className="text-muted">{guardian.email || '无邮箱'}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="flex flex-col gap-2">
+            <h3 className="flex items-center gap-1.5 section-title text-fg">
+              <MessageSquareQuote size={16} aria-hidden />
+              课堂记录
+              <span className="num text-meta text-muted font-400">{feedback.length}</span>
+            </h3>
+            <p className="text-row text-muted">
+              老师在点名页写下的原话。家长看不到这一块 —— 它给顾问和 AI 续费判断用。
+            </p>
+            {feedback.length === 0 ? (
+              <p className="text-row text-muted">
+                还没有课堂记录。老师在点名页写下的内容会出现在这里。
+              </p>
+            ) : (
+              <ul className="divide-y divide-border">
+                {feedback.map((entry) => (
+                  <li key={entry.id} className="flex flex-col gap-0.5 py-2">
+                    <span className="text-row text-muted">
+                      <span className="num">{shortDate(entry.lesson_date)}</span> · {entry.class_name} ·{' '}
+                      {entry.teacher_name}
+                    </span>
+                    <span className="text-row text-fg-2">
+                      “{entry.note}”
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="flex flex-col gap-2">
+            <h3 className="flex items-center gap-1.5 section-title text-fg">
+              <MessageSquareQuote size={16} aria-hidden />
+              已同步给家长
+              <span className="num text-meta text-muted font-400">{parentUpdates.length}</span>
+            </h3>
+            <p className="text-row text-muted">
+             顾问写给这个家庭的话，家长在自己的页面上能看到 —— 上面那一块看不到。
+            </p>
+            {parentUpdates.length === 0 ? (
+              <p className="text-row text-muted">还没有对家长说过什么。</p>
+            ) : (
+              <ul className="divide-y divide-border">
+                {/* 顺序由服务端给（已按 recorded_at 倒序），这里不再排一次 ——
+                    两处各排一次，迟早会在一边改了而另一边没改。 */}
+                {parentUpdates.map((entry) => (
+                  <li key={entry.id} className="flex flex-col gap-0.5 py-2">
+                    <span className="text-row text-muted">
+                      <span className="num">{shortDate(entry.recorded_at)}</span> ·{' '}
+                      {entry.speaker_name || '课程顾问'}
+                    </span>
+                    <span className="text-row text-fg-2">
+                      “{entry.note}”
                     </span>
                   </li>
                 ))}

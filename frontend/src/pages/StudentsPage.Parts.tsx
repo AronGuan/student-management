@@ -72,6 +72,10 @@ export function LedgerAmount({ delta }: { delta: number }) {
 export function CreditNumber({ balance, status }: { balance: number; status: StudentStatus }) {
   // 还没成交的学生根本没有课时包，余额读 0 是「还没有账」，不是「用完了」，更不是
   // 「透支」。在漏斗最前端挂一个红色感叹号，是提醒顾问一件他们此刻不该被提醒的事。
+  //
+  // 现在这条分支是**防御性**的：service/student.go 的 List 在调用方不传 status 时
+  // 已经把结果收口到 active + churned，所以这一页正常渲染不到 lead / trial。留着它是因为
+  // 「余额 0 对未成交的人不等于透支」这个判断本身仍然成立，不是因为预期会走到这里。
   if (status === 'lead' || status === 'trial') {
     return (
       <span

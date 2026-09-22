@@ -138,13 +138,18 @@ export default function StudentsPage() {
     }
     switch (view) {
       case 'mine':
-        return { message: '还没有分配给你的学生。', cta: '查看全部学生', go: () => update({ view: 'all', page: null }) };
+        // 「还没有分配给你的学生」在收口之后会变成假话：一个顾问完全可能手上有十条线索、
+        // 名下零个成交学生。这一页现在只列成交过的人，所以空态要如实说出那半句 ——
+        // 未成交的人不在本页，而在线索与试听页。
+        return { message: '你名下还没有成交的学生。线索和已约试听的人不在这一页。', cta: '打开线索与试听', go: () => navigate('/leads') };
       case 'low-credit':
         return { message: '没有学生达到续费阈值。', cta: '查看全部学生', go: () => update({ view: 'all', page: null }) };
       case 'scheduling':
         return { message: '所有学生都已报名班级。', cta: '打开班级', go: () => navigate('/classes') };
       default:
-        return { message: '还没有任何学生记录。请先登记第一条线索。', cta: '打开线索', go: () => navigate('/leads') };
+        // 同上：空集合现在只意味着「还没有人成交」，不意味着「一条线索都没有」。
+        // 原来的「请先登记第一条线索」在已经有线索、只是都还没转化时是错的建议。
+        return { message: '全中心还没有成交的学生。线索和已约试听的人不在这一页。', cta: '打开线索与试听', go: () => navigate('/leads') };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query, view]);

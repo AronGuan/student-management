@@ -2,7 +2,7 @@
  * 档案抽屉里的课时区：余额 + 课时条 + 课时包 + 只增不改的流水 + 两个写入动作。
  *
  * 课时包不再从流水里「还原」：GET /students/:id 现在直接返回 packages
- * （service/student_detail.go:122），所以包名、课时、价格、状态都是服务端原值，
+ * （service/student_detail.go:28），所以包名、课时、价格、状态都是服务端原值，
  * 不必拿 note / delta / created_at 去猜一张收据。
  *
  * 流水读 GET /students/:id/credits 的 { balance, items, total } —— 其中 total 是**全量**条数
