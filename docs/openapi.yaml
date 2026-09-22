@@ -620,7 +620,7 @@ paths:
                     properties:
                       # 以运行时为准：`handler/trial.go:83` 直接 `OK(c, fu)`，`data` 就是新建的
                       # FollowUp 本身，**没有** `{ trial, follow_up }` 这层包装（旧草案写错了）。
-                      # 前端曾按草案的包装写法做过防御（`LeadsPage.tsx:126-131` 两种都吃），
+                      # 前端曾按草案的包装写法做过防御，本轮已按实现删除，
                       # 这里按实现校正，避免契约继续声明一个服务端从不返回的形状。
                       data: { $ref: '#/components/schemas/FollowUp' }
         '403':
@@ -1635,17 +1635,49 @@ components:
 
     Trial:
       type: object
+      description: |
+        `model.Trial`（model.go:244-259）。**它同时被两个端点引用，而两个端点返回的键集并不相同**：
+        `GET /trials` 的 `items[]`（openapi.yaml:553）与 `POST /trials` 的 `data`（openapi.yaml:577）。
+
+        列表的 SELECT 是 `handler/trial.go:107-112`：
+        `SELECT t.*, s.full_name AS student_name, sub.name AS subject_name, u.display_name AS teacher_name`
+        加一个 `JOIN students` 与两个 `LEFT JOIN`。所以 `student_name` 在列表里**恒在**（学生表是
+        INNER JOIN）；`subject_name` / `teacher_name` 来自 LEFT JOIN，取不到时与 `teacher_id`、
+        `outcome_note` 一样落在零值 ⇒ 带 `omitempty`，**整个键缺席**。而 `POST /trials` 返回的是
+        JSON 绑定出来的 `model.Trial`（`handler/trial.go:135`），三个联表派生字段**整键缺席** ——
+        它们不是列，插入之后没有联表可填。
+
+        所以本 schema 描述的是**并集**，逐字段注明由哪个端点填充，而不是假装每个端点都返回全部键。
+        这层差异**刻意不拆成第二个 schema**：`subject_name` 早就在本 schema 里，而 `POST /trials`
+        同样不填它，要拆就得连它一起搬走，改动远大于这个缺口本身。把取舍写在这里，是为了让下一个
+        人不必重新判断一次。
+
+        **反序列化口径**：带 `omitempty` 的字段在 Go 零值时**整个键缺席**，不是 `null` —— 因此这些
+        字段**刻意不写 `nullable: true`**（理由同 `TrialRow` 与 `FollowUp`）：那会声明一个永远不会
+        出现的 `null`，把客户端引去判空错误的对象；判空要写 `undefined`（`?? / == null` 两者都能兜住）。
       properties:
         id: { type: integer, format: int64 }
         student_id: { type: integer, format: int64 }
         subject_id: { type: integer, format: int64 }
-        subject_name: { type: string }
-        teacher_id: { type: integer, format: int64 }
+        subject_name:
+          type: string
+          description: 带 omitempty：无科目时键缺席（undefined），不是 null。只有 `GET /trials` 会填它
+        teacher_id: { type: integer, format: int64, description: "omitempty 指针：无老师时键缺席（undefined），非 null" }
         scheduled_at: { type: string, format: date-time }
         duration_min: { type: integer }
         outcome: { type: string, enum: [pending, converted, lost] }
-        outcome_note: { type: string, nullable: true }
+        outcome_note: { type: string, description: "omitempty：无备注时键缺席（undefined），非 null" }
         created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time, description: "无 omitempty：恒在" }
+        student_name:
+          type: string
+          description: |
+            `GET /trials` 会填它，且在列表里**恒在**（`handler/trial.go:107` 取 `s.full_name`，
+            学生表是 INNER JOIN）。`POST /trials` 不填它 ⇒ 那边键缺席（undefined），不是 null
+            —— 字段本身带 `omitempty`。
+        teacher_name:
+          type: string
+          description: 带 omitempty：无老师时键缺席（undefined），不是 null。只有 `GET /trials` 会填它
 
     CreateTrialRequest:
       type: object
