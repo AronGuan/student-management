@@ -103,6 +103,11 @@ func (h *StudentHandler) Create(c *gin.Context) {
 // (R7 restricts writes, not reads) but a household credential is held to
 // its own children: the record carries guardians' contact details and the
 // billing history, so another family's profile is not readable at all.
+//
+// "Which student" and "which fields" are two separate questions and this
+// endpoint has to answer both. AssertReadable settles the first one; the trim
+// at the bottom settles the second. A family may read its own child and still
+// not be entitled to everything on the row.
 func (h *StudentHandler) Get(c *gin.Context) {
 	id, ok := parseID(c, "id")
 	if !ok {
@@ -125,6 +130,38 @@ func (h *StudentHandler) Get(c *gin.Context) {
 	}
 	detail.CanWrite = cu.Role == model.RoleAdmin &&
 		detail.OwnerAdminID != nil && *detail.OwnerAdminID == cu.ID
+
+	// A household credential may read its own child, but not the internal half
+	// of the record. recent_feedback is the teacher's staffroom remark and
+	// follow_ups is the consultant's own handling record - both are written for
+	// colleagues. latest_ai_card is a risk assessment *about this family*,
+	// produced to decide whether to chase a renewal. Returning them and trusting
+	// the UI not to render them is not a boundary, it is a rendering choice:
+	// anyone holding the token can read the JSON.
+	//
+	// The whole follow_ups row goes, not just its note: due_at, status and
+	// completed_at say what the centre owes this family and whether it is
+	// overdue. The household has no reason to see that ledger exist, let alone
+	// its contents.
+	//
+	// Blanked to empty collections rather than dropped keys, so one endpoint
+	// keeps one shape and a family cannot map the internal fields by diffing
+	// against what staff receive. The deliberate exception is latest_ai_card,
+	// which is a map and not a pointer, so nil serialises as an explicit null
+	// rather than vanishing; the key's existence is already public in the
+	// spec, and a null card discloses nothing about the family.
+	//
+	// Deliberately NOT trimmed: owner_admin_id, source, guardians, packages,
+	// enrollments, balance, can_write. The rule is "withhold internal speech
+	// and internal reasoning", not "blank everything a household sees" - a
+	// parent is entitled to their child's classes, credit packages and the
+	// contact details we hold.
+	if cu.Role == model.RoleStudent {
+		detail.RecentFeedback = []service.FeedbackRow{}
+		detail.FollowUps = []service.FollowUpRow{}
+		detail.LatestAICard = nil
+	}
+
 	OK(c, detail)
 }
 

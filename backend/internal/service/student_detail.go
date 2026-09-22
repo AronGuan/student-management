@@ -24,10 +24,20 @@ type StudentDetail struct {
 	// this student is in right now" must filter on status == "active" -
 	// StudentListItem.active_class_count is the pre-filtered count if a
 	// number is all that is needed.
-	Enrollments  []EnrollmentRow        `json:"enrollments"`
-	Packages     []model.CreditPackage  `json:"packages"`
-	FollowUps    []FollowUpRow          `json:"follow_ups"`
-	LatestAICard map[string]interface{} `json:"latest_ai_card"`
+	Enrollments []EnrollmentRow       `json:"enrollments"`
+	Packages    []model.CreditPackage `json:"packages"`
+	FollowUps   []FollowUpRow         `json:"follow_ups"`
+	// RecentFeedback is the teacher's own remarks, newest first, capped at
+	// 10. It exists so the drawer can show "what the teacher said" without
+	// the adviser opening each lesson; the AI renewal card reads the same
+	// column through the same cleaning rule.
+	RecentFeedback []FeedbackRow `json:"recent_feedback"`
+	// ParentUpdates is the mirror image of RecentFeedback and deliberately a
+	// second array: RecentFeedback is what the staff wrote for each other,
+	// this is what the family was actually shown. Neither is derived from
+	// the other, and the drawer must not present one as the other.
+	ParentUpdates []ParentUpdateRow      `json:"parent_updates"`
+	LatestAICard  map[string]interface{} `json:"latest_ai_card"`
 }
 
 type GuardianRow struct {
@@ -53,16 +63,51 @@ type EnrollmentRow struct {
 	WithdrawnOn *string `json:"withdrawn_on"`
 }
 
+// FollowUpRow is the drawer's view of one follow-up.
+//
+// Source is spelled out rather than left out of the projection: the
+// contract for this array is the FollowUp schema, where the key is always
+// present (no omitempty). A key that is merely absent is not a neutral
+// omission - a reader that branches on source sees a third value, not
+// "unknown", and the drawer would be the one place in the API where a
+// follow-up arrives with no origin.
 type FollowUpRow struct {
 	ID                uint64     `json:"id"`
 	StudentID         uint64     `json:"student_id"`
 	StudentName       string     `json:"student_name"`
 	TrialID           *uint64    `json:"trial_id"`
+	Source            string     `json:"source"`
 	DueAt             time.Time  `json:"due_at"`
 	Status            string     `json:"status"`
 	CompletedAt       *time.Time `json:"completed_at"`
 	CompletedByUserID *uint64    `json:"completed_by_user_id"`
 	Note              string     `json:"note"`
+}
+
+// FeedbackRow is one piece of teacher feedback as the drawer shows it: the
+// remark plus the lesson it belongs to. Note is already cleaned - the system
+// strings that share attendances.note never reach this struct.
+type FeedbackRow struct {
+	ID          uint64    `json:"id"`
+	LessonDate  string    `json:"lesson_date"`
+	ClassName   string    `json:"class_name"`
+	SubjectName string    `json:"subject_name"`
+	TeacherName string    `json:"teacher_name"`
+	Status      string    `json:"status"`
+	Note        string    `json:"note"`
+	RecordedAt  time.Time `json:"recorded_at"`
+}
+
+// ParentUpdateRow is the family-facing half of a consultant's follow-up: the
+// sentence the consultant chose to say to this family, and who said it. It is
+// a separate array from RecentFeedback on purpose - RecentFeedback is the
+// teacher's staffroom record and is internal; this one is what the family
+// actually reads on /me. The two are never derived from each other.
+type ParentUpdateRow struct {
+	ID          uint64    `json:"id"`
+	Note        string    `json:"note"`
+	SpeakerName string    `json:"speaker_name"`
+	RecordedAt  time.Time `json:"recorded_at"`
 }
 
 func (s *StudentService) Detail(db *gorm.DB, id uint64) (*StudentDetail, error) {
@@ -71,11 +116,13 @@ func (s *StudentService) Detail(db *gorm.DB, id uint64) (*StudentDetail, error) 
 		return nil, err
 	}
 	d := &StudentDetail{
-		Student:     st,
-		Guardians:   []GuardianRow{},
-		Enrollments: []EnrollmentRow{},
-		Packages:    []model.CreditPackage{},
-		FollowUps:   []FollowUpRow{},
+		Student:        st,
+		Guardians:      []GuardianRow{},
+		Enrollments:    []EnrollmentRow{},
+		Packages:       []model.CreditPackage{},
+		FollowUps:      []FollowUpRow{},
+		RecentFeedback: []FeedbackRow{},
+		ParentUpdates:  []ParentUpdateRow{},
 	}
 
 	if err := db.Raw(`SELECT id, name, phone, email, relationship, is_primary
@@ -136,11 +183,78 @@ func (s *StudentService) Detail(db *gorm.DB, id uint64) (*StudentDetail, error) 
 	}
 
 	if err := db.Raw(`SELECT fu.id, fu.student_id, s.full_name AS student_name, fu.trial_id,
-			fu.due_at, fu.status, fu.completed_at, fu.completed_by_user_id, fu.note
+			fu.source, fu.due_at, fu.status, fu.completed_at, fu.completed_by_user_id, fu.note
 		FROM follow_ups fu
 		JOIN students s ON s.id = fu.student_id
 		WHERE fu.student_id = ?
 		ORDER BY fu.created_at DESC, fu.id DESC`, id).Scan(&d.FollowUps).Error; err != nil {
+		return nil, err
+	}
+
+	// Teacher feedback, drawn from the same column the renewal card reads.
+	//
+	// The WHERE narrows to human-written rows, but it cannot stand alone:
+	// Override stamps source='teacher_override' too, so a bare "corrected
+	// from X" note passes the filter. teacherFeedback is the real rule, and
+	// reusing it here keeps the drawer and the AI card from ever showing
+	// two different readings of the same note.
+	//
+	// Rows it rejects are dropped rather than blanked, so the LIMIT can
+	// come back under 10 - which is correct: ten rows of scaffolding is
+	// worth less than three rows a teacher actually wrote.
+	//
+	// teacher_name is the author of the remark, not the class's regular
+	// teacher: the drawer prints it directly beside the quote, and a
+	// substitute who marked the lesson would otherwise be attributed with
+	// words they never wrote. recorded_by_user_id is the only column that
+	// records who actually typed it, so it wins whenever it is set.
+	//
+	// lesson_date goes through DATE_FORMAT rather than being scanned raw:
+	// the DSN sets parseTime=true, so a DATE column arrives as a time.Time
+	// and would serialise as a full RFC3339 timestamp. The contract for this
+	// field is a plain "2006-01-02" date.
+	var fb []FeedbackRow
+	if err := db.Raw(`SELECT a.id, DATE_FORMAT(l.lesson_date, '%Y-%m-%d') AS lesson_date,
+			c.name AS class_name,
+			COALESCE(sub.name,'') AS subject_name, COALESCE(u.display_name,'') AS teacher_name,
+			a.status, a.note, a.recorded_at
+		FROM attendances a
+		JOIN lessons l ON l.id = a.lesson_id
+		JOIN classes c ON c.id = l.class_id
+		LEFT JOIN subjects sub ON sub.id = c.subject_id
+		LEFT JOIN users u ON u.id = COALESCE(a.recorded_by_user_id, c.teacher_id)
+		WHERE a.student_id = ? AND a.source = 'teacher_override'
+		  AND a.note IS NOT NULL AND a.note <> ''
+		ORDER BY a.recorded_at DESC, a.id DESC LIMIT 10`, id).Scan(&fb).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range fb {
+		txt, ok := teacherFeedback(r.Note)
+		if !ok {
+			continue
+		}
+		r.Note = txt
+		d.RecentFeedback = append(d.RecentFeedback, r)
+	}
+
+	// What the family was actually told, from the consultant's side of the
+	// same event. Separate query, separate table, no join to attendances:
+	// a parent update is not a remark about a lesson, so there is no lesson
+	// to point at - follow_ups carries no lesson_id, and inventing one from
+	// the surrounding dates would be a guess dressed as a fact.
+	//
+	// Sorted by parent_note_at rather than created_at, because the family's
+	// question is "when were we last spoken to", not "when was this row
+	// made" - the row can be created days before anyone picks up the phone.
+	// LIMIT 10 matches recent_feedback so both lists page the same way.
+	if err := db.Raw(`SELECT fu.id, fu.parent_note AS note,
+			COALESCE(u.display_name,'') AS speaker_name,
+			fu.parent_note_at AS recorded_at
+		FROM follow_ups fu
+		LEFT JOIN users u ON u.id = fu.parent_note_by_user_id
+		WHERE fu.student_id = ? AND fu.parent_note IS NOT NULL AND fu.parent_note <> ''
+		ORDER BY fu.parent_note_at DESC, fu.id DESC LIMIT 10`, id).
+		Scan(&d.ParentUpdates).Error; err != nil {
 		return nil, err
 	}
 

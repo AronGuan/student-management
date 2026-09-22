@@ -90,8 +90,33 @@ func (s *StudentService) List(db *gorm.DB, f StudentFilter) ([]StudentListItem, 
 	args := []interface{}{}
 
 	if f.Status != "" {
+		// An explicit status always wins. This branch is load-bearing, not a
+		// convenience: the leads board reads ?status=lead (LeadsPage.tsx), so any
+		// default that could override the caller's intent would silently empty
+		// that panel. The default below must stay in the else.
 		where = append(where, "s.status = ?")
 		args = append(args, f.Status)
+	} else {
+		// No status = the student directory, which is about people who have
+		// bought in. 'lead' and 'trial' are excluded from the *definition*
+		// rather than filtered afterwards, for the same reason the low-credit
+		// branch below carries its own status test: neither stage has ever
+		// opened an account, so every column this page exists to show about
+		// them - balance, class count, renewal timing - reads as empty. Listing
+		// them fills the page with rows that look like broken data (measured:
+		// 15 rows, 4 of them "尚未报名 / — 未购课") and answers none of the
+		// questions the page is for. Those two stages already have their own
+		// screen: /leads renders them as prospects (source, days idle) and as
+		// trials (outcome badge), with columns designed for that stage.
+		//
+		// 'churned' stays in. Those families did buy, the ledger still holds
+		// their history, and "who left us" is a question only this page can
+		// answer.
+		//
+		// Known and accepted: ?status=churned&low_credit=1 remains an empty set
+		// (the low-credit branch below pins status to 'active'); the students
+		// page never sends that pair.
+		where = append(where, "s.status IN ('active','churned')")
 	}
 	if f.Query != "" {
 		where = append(where, "(s.full_name LIKE ? OR s.preferred_name LIKE ?)")
@@ -122,11 +147,11 @@ func (s *StudentService) List(db *gorm.DB, f StudentFilter) ([]StudentListItem, 
 		// this queue exists to surface, which is the wrong direction.
 		//
 		// The other two implementations of this question already carry the
-		// same predicate - reportStates (seed.go:785-787) and the workbench
-		// queue (handler/dashboard.go:101) - so this endpoint was the only
+		// same predicate - reportStates (seed.go:1160-1162) and the workbench
+		// queue (handler/dashboard.go:157) - so this endpoint was the only
 		// one answering it without the status test, and the split was
 		// already live rather than latent: the seed drains its low-credit
-		// sample by index (seed.go:753, `i%6==0`) without consulting the
+		// sample by index (seed.go:898, `i%6==0`) without consulting the
 		// status, so two 'lead' students sit at balance 2, and the 课时不足
 		// tab listed those 7 rows while the workbench headline said 5.
 		//

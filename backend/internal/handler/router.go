@@ -65,7 +65,10 @@ func Register(r *gin.Engine, d *Deps) {
 		authed.PATCH("/students/:id", middleware.RequireRoles(model.RoleAdmin), stu.Patch)
 		authed.POST("/students/:id/transfer-owner", middleware.RequireRoles(model.RoleAdmin), stu.TransferOwner)
 		authed.GET("/students/:id/credits", stu.Credits)
-		authed.GET("/students/:id/ai-cards", ai.Cards)
+		// Staff only: a decision card is an internal risk judgement about a
+		// family, and this route hands over the exact object GET /students/:id
+		// withholds from households as latest_ai_card.
+		authed.GET("/students/:id/ai-cards", middleware.RequireRoles(model.RoleAdmin, model.RoleTeacher), ai.Cards)
 		authed.POST("/students/:id/credit-packages", middleware.RequireRoles(model.RoleAdmin), stu.Purchase)
 		authed.POST("/students/:id/credit-adjustments", middleware.RequireRoles(model.RoleAdmin), stu.Adjustment)
 
