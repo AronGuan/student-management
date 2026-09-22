@@ -1,6 +1,9 @@
 package config
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
@@ -37,8 +40,27 @@ type DeepSeekConfig struct {
 }
 
 func Load() (*Config, error) {
-	_ = godotenv.Load()          // repo-local .env
-	_ = godotenv.Load("../.env") // when running from backend/
+	// Two candidate paths, because scripts/ starts the server from backend/ while
+	// README §1.3 tells you to run it from the repo root. Missing is fine - an
+	// operator may legitimately supply the variables another way, e.g. systemd's
+	// EnvironmentFile (deploy.md §8.2), so absence must not be an error.
+	//
+	// A file that EXISTS but does not PARSE is a different thing, and used to be
+	// indistinguishable from a missing one: both errors were discarded here, and
+	// the only symptom was far downstream - "DB_DSN has no database name" from
+	// repo.EnsureDatabase, which really means "DB_DSN is empty". Fail loudly at
+	// the point where the cause is still visible.
+	//
+	// This does not catch every way a .env goes quiet. Measured, not assumed:
+	// godotenv TOLERATES a quoted value wrapped across two lines (it swallows the
+	// newline into the value and returns no error), and a .env that simply has no
+	// DB_DSN line parses fine. Neither of those is reachable from here; they
+	// still surface only as the empty-DSN error in repo.EnsureDatabase.
+	for _, p := range []string{".env", "../.env"} {
+		if err := godotenv.Load(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("cannot parse %s: %w", p, err)
+		}
+	}
 
 	return &Config{
 		Port:      getenv("PORT", "19080"),

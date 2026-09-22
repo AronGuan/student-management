@@ -42,13 +42,34 @@ func Init(dsn string, debug bool) error {
 // MySQL refuses to connect to a database that has not been created yet, which
 // makes a first-run "go run ./cmd/server -migrate" impossible otherwise.
 func EnsureDatabase(dsn string) (bool, error) {
+	// Checked here rather than only in Init, because Init never gets a chance to
+	// run: this function is called first (cmd/server/main.go:32) and returns an
+	// error, so Init's far clearer "DB_DSN is empty" message is unreachable.
+	//
+	// Without this, an unset DB_DSN surfaces as "DB_DSN has no database name",
+	// which sends you hunting for a typo in a DSN that was never loaded at all.
+	// Verified against go-sql-driver/mysql v1.10.1: ParseDSN("") returns a nil
+	// error and an empty DBName (dsn.go:472 guards on len(dsn) > 0), so the
+	// empty case and the "trailing slash with no name" case are indistinguishable
+	// downstream. The usual cause is a missing .env - both godotenv.Load() calls
+	// in config.Load() are best-effort and their errors are discarded, so "there
+	// is no .env here" is otherwise completely silent.
+	if dsn == "" {
+		return false, fmt.Errorf("DB_DSN is empty: no .env was loaded, and the variable " +
+			"is not set in the environment either.\n" +
+			"        config.Load() looks for ./.env and then ../.env, so when the server is\n" +
+			"        started from backend/ the file has to be at the repository root - one level\n" +
+			"        above backend/, next to README.md. Copy .env.example there and fill it in.")
+	}
+
 	cfg, err := drivermysql.ParseDSN(dsn)
 	if err != nil {
 		return false, fmt.Errorf("parse DSN: %w", err)
 	}
 	name := cfg.DBName
 	if name == "" {
-		return false, fmt.Errorf("DB_DSN has no database name")
+		return false, fmt.Errorf("DB_DSN has no database name: %q has no /dbname segment",
+			redactDSN(dsn))
 	}
 	cfg.DBName = ""
 	server, err := sql.Open("mysql", cfg.FormatDSN())
@@ -78,4 +99,20 @@ func EnsureDatabase(dsn string) (bool, error) {
 // Tx runs fn inside a transaction, rolling back on error.
 func Tx(fn func(tx *gorm.DB) error) error {
 	return DB.Transaction(fn)
+}
+
+// redactDSN strips the password so a malformed DSN can be echoed back in an
+// error without writing credentials into the server log. Only the userinfo
+// segment is masked; everything after the '@' is kept, because that is the part
+// the reader needs to see to understand what went wrong.
+func redactDSN(dsn string) string {
+	at := strings.LastIndex(dsn, "@")
+	if at < 0 {
+		return dsn
+	}
+	head := dsn[:at]
+	if colon := strings.Index(head, ":"); colon >= 0 {
+		head = head[:colon] + ":***"
+	}
+	return head + dsn[at:]
 }
