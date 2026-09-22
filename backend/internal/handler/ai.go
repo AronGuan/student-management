@@ -54,8 +54,15 @@ func (h *AIHandler) Renewal(c *gin.Context) {
 // first. It lets the UI re-open a card that was already generated without
 // paying for another model call.
 //
-// The same read-scope rule as GET /students/:id applies: staff may read
-// any student, a household only the children on its own credential.
+// Staff only, and gated on the route rather than in here. A card is an
+// internal commercial judgement about a family - churn_risk, an adviser's
+// recommended action, and an evidence list that quotes the teacher's own
+// staffroom remarks. GET /students/:id already withholds latest_ai_card from a
+// household credential for that reason, and this endpoint would hand the same
+// object over verbatim, so a read-scope rule alone would leave the boundary
+// open through the second door. The spend routes (/ai/renewal-risk,
+// /ai/trial-conversion) are admin-only for the same reason; the read-back
+// keeps teachers, who are staff and see no less elsewhere.
 func (h *AIHandler) Cards(c *gin.Context) {
 	id, ok := parseID(c, "id")
 	if !ok {

@@ -279,9 +279,23 @@ func (s *AIService) Renewal(db *gorm.DB, studentID uint64) (*RenewalCard, error)
 	_ = db.Raw(`SELECT COUNT(*) FROM attendances WHERE student_id=? AND status IN ('present','late')`, studentID).Scan(&attended)
 	_ = db.Raw(`SELECT COUNT(*) FROM attendances WHERE student_id=? AND status='absent'`, studentID).Scan(&absent)
 
-	var lastFeedback []string
-	_ = db.Raw(`SELECT note FROM attendances WHERE student_id=? AND note IS NOT NULL AND note <> ''
-		ORDER BY recorded_at DESC LIMIT 3`, studentID).Scan(&lastFeedback)
+	// Only rows a human wrote. attendances.note is shared with two system
+	// writers (see teacherFeedback), and feeding their boilerplate to the
+	// model let it raise feedback_negative out of its own scaffolding.
+	//
+	// source='teacher_override' is not sufficient on its own: the correction
+	// path also stamps that source, so a "corrected from X"-only note would
+	// still slip through. Hence the Go-side pass as the real filter.
+	var rawFeedback []string
+	_ = db.Raw(`SELECT note FROM attendances
+		WHERE student_id=? AND source='teacher_override' AND note IS NOT NULL AND note <> ''
+		ORDER BY recorded_at DESC LIMIT 3`, studentID).Scan(&rawFeedback)
+	lastFeedback := []string{}
+	for _, n := range rawFeedback {
+		if txt, ok := teacherFeedback(n); ok {
+			lastFeedback = append(lastFeedback, txt)
+		}
+	}
 
 	bal := toInt(m["balance"])
 	prompt := buildRenewalPrompt(m, attended, absent, lastFeedback)
@@ -398,7 +412,12 @@ func buildRenewalEvidence(balance, attended, absent int, notes []string) []strin
 		fmt.Sprintf("%d sessions attended, %d absences", attended, absent),
 	}
 	if len(notes) > 0 {
-		ev = append(ev, "Recent teacher feedback on file")
+		// The adviser reads this panel to decide the call, so the line has
+		// to carry the teacher's actual words - "feedback on file" told
+		// them nothing they could act on.
+		for _, n := range notes {
+			ev = append(ev, "Teacher feedback: "+truncate(n, 80))
+		}
 	} else {
 		ev = append(ev, "No teacher feedback yet")
 	}
@@ -539,6 +558,39 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// The two system strings this file has to recognise are declared in
+// attendance.go, beside the writes that produce them. Repeating the
+// literals here would let the writer and the reader drift apart with
+// nothing in the build to catch it.
+
+// teacherFeedback extracts the part of an attendances.note a human actually
+// typed, reporting false when the column holds only system text.
+//
+// The column has two non-human writers. ResolveLeave (attendance.go) stores
+// the literal "late leave: notice < 24h" as the note, and Override appends
+// " | corrected from <old status>" to whatever was already there. Neither is
+// evidence about the student, but the renewal card used to shovel the raw
+// column into the prompt, so the model could answer feedback_negative from
+// this scaffolding - a risk flag with no observer behind it.
+//
+// The appended suffix is removed by splitting on the first marker rather
+// than trimming a suffix: repeated corrections stack ("X | corrected from
+// present | corrected from late"). A note that *starts* with the prefix is
+// a different case - CONCAT_WS skips NULL, so when the original note was
+// absent the suffix lands in the column alone and reads as "corrected from
+// present", with no separator to split on. Override only ever writes that
+// text in front of a NULL column, never in front of a teacher's words, so
+// the prefix marks the whole note as system-generated.
+func teacherFeedback(note string) (string, bool) {
+	note = strings.TrimSpace(strings.Split(note, correctionMarker)[0])
+	if note == "" || note == lateLeaveNote || strings.HasPrefix(note, correctionPrefix) {
+		return "", false
+	}
+	// Matches buildRenewalEvidence's own cap, so the text the adviser reads
+	// and the text the model sees are the same length.
+	return truncate(note, 200), true
 }
 
 // toInt reads a numeric value out of a map scan. The extra []byte and
