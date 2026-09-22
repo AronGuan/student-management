@@ -216,7 +216,11 @@ export default function TeachTodayPage() {
               </span>
             }
           />
-          <TeachRoster lessonId={selected.id} onRecorded={load} />
+          <TeachRoster
+            lessonId={selected.id}
+            isToday={todayKey === null || selected.lesson_date === todayKey}
+            onRecorded={load}
+          />
         </Panel>
       )}
     </main>

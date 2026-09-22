@@ -4,7 +4,7 @@
  * GET /lessons/:id/roster 的实际形状（service.AttendanceService.Roster；契约见 lib/types.ts
  * 的 Roster / RosterEntry）：固定是 `{ lesson, entries }`（handler 里 `OK(c, view)`，不是裸数组），
  * 每行只有 student_id / student_name / is_new_to_class / prefilled_status / current_status /
- * source / balance，**没有** status、settles、leave_resolution。
+ * source / balance / note，**没有** status、settles、leave_resolution。
  *
  * prefilled_status 与 current_status 都是 *string（未记录即 null），两者必须分开看：
  * 前者是系统按请假记录预先判定的结果，后者是老师真正点过名的结果。归一化后页面只认
@@ -29,6 +29,8 @@ export interface RosterRow {
    * 之前就把后果写在行上，而不是提交后才告诉他扣了课时。
    */
   settles: string;
+  /** 服务端已保存的备注（未填即空串）。老师本次输入走 Roster 的 noteDraft */
+  note: string;
 }
 
 interface RawEntry {
@@ -38,6 +40,7 @@ interface RawEntry {
   current_status?: AttendanceStatus | null;
   prefilled_status?: AttendanceStatus | null;
   is_new_to_class?: boolean;
+  note?: string | null;
 }
 
 /** 服务端固定返回 { lesson, entries }；lesson 不取用，只读 entries */
@@ -58,6 +61,7 @@ export function normaliseRoster(res: RosterResponse): RosterRow[] {
       is_new_to_class: entry.is_new_to_class ?? false,
       // 不重抄一遍扣费规则：直接问 chargesACredit（它对应 Go 的 Charges()）
       settles: status === 'unrecorded' ? '待结算' : chargesACredit(status) ? '−1 课时' : '不扣课时',
+      note: entry.note ?? '',
     };
   });
 }
@@ -74,6 +78,36 @@ export function chargesACredit(status: AttendanceStatus): boolean {
 
 export function isLeave(status: AttendanceStatus): boolean {
   return status === 'leave_approved' || status === 'leave_late';
+}
+
+/**
+ * 这一行在 attendances 里是不是已经落了行 —— 决定「纠错」（PATCH）能不能用。
+ *
+ * 唯一不落行的是 leave_approved：服务端 RequestLeave 在「提前满 24h、不扣课时」那条
+ * 路径上直接 return，一个字都不写；而 Override 要求目标行存在（prev.ID != 0），否则
+ * 404。所以这一态上放「纠错」等于放一个必然报错的入口 —— 它的正确修法是重新走一次
+ * POST 结算，不是纠错。
+ */
+export function hasAttendanceRow(status: AttendanceStatus): boolean {
+  return status !== 'leave_approved';
+}
+
+/**
+ * 这一行是否还等着老师做选择 —— 「全班都选完才能提交」的判定。
+ *
+ * 为什么要拦：一次 POST 只提交老师选过的行，没选的人服务端不会收到、也就不会被点名，
+ * 而老师看着一张点了一半的表，会以为整节课都点完了。半张表提交比空表更危险。
+ *
+ * 三种行算「已定」，不算在待选里：
+ *   - 老师自己选的出勤 / 迟到 / 缺席（isTeacherStatus）；
+ *   - 系统按请假记录判定的两态（只读，老师无权改，也不该被要求去"选"）；
+ *   - 老师点开「覆盖系统判定」后已经自己重选过的（此时 draft 已是老师的选择）。
+ * 唯一要提醒的是第三种：点开覆盖却还没落子时，draft 仍是请假态，算作待选。
+ */
+export function needsTeacherChoice(status: AttendanceStatus, overrideOpen: boolean): boolean {
+  if (isTeacherStatus(status)) return false;
+  if (isLeave(status)) return overrideOpen;
+  return true;
 }
 
 /**
