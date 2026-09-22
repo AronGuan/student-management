@@ -107,7 +107,37 @@ func (s *StudentService) List(db *gorm.DB, f StudentFilter) ([]StudentListItem, 
 	// @@sql_mode includes ONLY_FULL_GROUP_BY on this instance.
 	join := "LEFT JOIN v_student_balance b ON b.student_id = s.id"
 	if f.LowCreditOnly {
-		where = append(where, "COALESCE(b.balance,0) <= ?")
+		// status='active' belongs to the definition rather than being a
+		// refinement of it: "low on credit" is a renewal warning, and only
+		// a family that has already bought in can be up for renewal. A
+		// 'lead' or 'trial' student reads 0 here because nobody has opened
+		// an account yet, so listing them would fill the renewal queue with
+		// prospects who never converted; 'churned' is gone and is not a
+		// renewal either.
+		//
+		// Deliberately a status test and not EXISTS(credit_packages): an
+		// 'active' student whose package was never opened also reads 0, and
+		// that row *should* appear here - it is the reminder to open one.
+		// Asking "has this student ever bought" would drop exactly the case
+		// this queue exists to surface, which is the wrong direction.
+		//
+		// The other two implementations of this question already carry the
+		// same predicate - reportStates (seed.go:785-787) and the workbench
+		// queue (handler/dashboard.go:101) - so this endpoint was the only
+		// one answering it without the status test, and the split was
+		// already live rather than latent: the seed drains its low-credit
+		// sample by index (seed.go:753, `i%6==0`) without consulting the
+		// status, so two 'lead' students sit at balance 2, and the 课时不足
+		// tab listed those 7 rows while the workbench headline said 5.
+		//
+		// Known and accepted: ?status=churned&low_credit=1 returns an empty
+		// set, because this predicate contradicts the caller's own status
+		// filter. That combination is meaningless and the students page
+		// never makes it (it sends low_credit without status), so there is
+		// no special case for it. Dropping one of the two predicates
+		// instead would be the "filter that silently disappears" that the
+		// handler already refuses for owner_admin_id (handler/student.go:51).
+		where = append(where, "s.status = 'active'", "COALESCE(b.balance,0) <= ?")
 		args = append(args, f.LowCreditAt)
 	}
 
