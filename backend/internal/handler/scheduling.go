@@ -363,7 +363,7 @@ func (h *SchedulingHandler) Settle(c *gin.Context) {
 		return
 	}
 	cu := middleware.Current(c)
-	charged, err := h.Att.Settle(DB, cu.ID, id, body.Marks)
+	charged, err := h.Att.Settle(DB, h.Cfg, cu.ID, id, body.Marks)
 	if err != nil {
 		Fail(c, err)
 		return

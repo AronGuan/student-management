@@ -22,6 +22,13 @@ type RosterEntry struct {
 	CurrentStatus   *string `json:"current_status"`
 	Source          string  `json:"source"`
 	Balance         int     `json:"balance"`
+	// Note is the teacher's free-text remark on this row. It is the only
+	// field on the sheet a teacher owns outright - balance and
+	// is_new_to_class are derived, and the two leave statuses are judged
+	// by the server. Returning it is what makes the remark column a field
+	// rather than a write-only slot: without it a typed note survives in
+	// the database but disappears from the sheet on the next load.
+	Note *string `json:"note"`
 }
 
 // RosterView is the lesson together with its roll-call sheet.
@@ -56,6 +63,7 @@ func (s *AttendanceService) Roster(db *gorm.DB, lessonID uint64) (*RosterView, e
 		Balance         int     `json:"balance"`
 		CurrentStatus   *string `json:"current_status"`
 		Source          string  `json:"source"`
+		Note            *string `json:"note"`
 		LeaveResolution string  `json:"leave_resolution"`
 		IsNewToClass    bool    `json:"is_new_to_class"`
 	}
@@ -64,6 +72,7 @@ func (s *AttendanceService) Roster(db *gorm.DB, lessonID uint64) (*RosterView, e
 		       s.full_name AS student_name,
 		       COALESCE(b.balance,0) AS balance,
 		       a.status AS current_status,
+		       a.note AS note,
 		       CASE WHEN a.id IS NULL THEN 'unrecorded' ELSE a.source END AS source,
 		       lr.resolution AS leave_resolution,
 		       NOT EXISTS (
@@ -92,6 +101,7 @@ func (s *AttendanceService) Roster(db *gorm.DB, lessonID uint64) (*RosterView, e
 			CurrentStatus: raw[i].CurrentStatus,
 			Source:        raw[i].Source,
 			Balance:       raw[i].Balance,
+			Note:          raw[i].Note,
 		}
 		// The leave record is the only source of a prefilled status, and it
 		// is advisory: the roll call itself lives in current_status.

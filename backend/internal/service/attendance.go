@@ -14,17 +14,50 @@ import (
 type AttendanceService struct{}
 
 type Mark struct {
-	StudentID uint64                 `json:"student_id"`
-	Status    model.AttendanceStatus `json:"status"`
-	Note      string                 `json:"note"`
+	StudentID     uint64                 `json:"student_id"`
+	Status        model.AttendanceStatus `json:"status"`
+	Note          string                 `json:"note"`
+	// A flag, not a second text field. The teacher's observation already
+	// went into Note above; this only says "someone else has to pick this
+	// up", and the sentence the family eventually reads is written later
+	// by the consultant (follow_ups.parent_note). Two text fields would be
+	// two copies of one thought, drifting apart the moment either is
+	// edited.
+	NeedsFollowUp bool                   `json:"needs_follow_up"`
 }
 
+// The two strings this file writes into attendances.note with no human
+// behind them. They live here because this is where they are written, and
+// they are package-level because ai.go reads the same column back as
+// "teacher feedback" and has to recognise them: if either literal drifts,
+// the renewal card starts quoting system scaffolding as though a teacher
+// had said it, and nothing else in the build would notice. One definition
+// makes that impossible rather than merely unlikely.
+const (
+	// correctionPrefix is what Override stamps ahead of the old status when
+	// it audits a correction, e.g. "corrected from present".
+	correctionPrefix = "corrected from "
+	// correctionMarker is that same text as it appears once CONCAT_WS has
+	// joined it to whatever the column already held. Repeated corrections
+	// stack, so a reader has to split on the first occurrence rather than
+	// trim a suffix.
+	correctionMarker = " | corrected from "
+	// lateLeaveNote is the entire note ResolveLeave writes when notice was
+	// under 24h. That row carries no teacher remark at all.
+	lateLeaveNote = "late leave: notice < 24h"
+)
+
 // Settle is R4 + R5: recording attendance moves money.
+//
+// It has a second output besides money: a mark carrying needs_follow_up
+// opens a consultant task in the same transaction. That is why it takes
+// cfg - the task's deadline is the same configured SLA the trial path
+// uses, not a literal repeated here.
 //
 // Ordering rule: every credit-writing transaction locks the student row
 // first. Without it two concurrent settles could both read the same
 // balance and both write -1.
-func (s *AttendanceService) Settle(db *gorm.DB, actorID, lessonID uint64, marks []Mark) (int, error) {
+func (s *AttendanceService) Settle(db *gorm.DB, cfg *config.Config, actorID, lessonID uint64, marks []Mark) (int, error) {
 	ls := &model.Lesson{}
 	if err := db.Raw("SELECT * FROM lessons WHERE id = ?", lessonID).Scan(ls).Error; err != nil {
 		return 0, err
@@ -71,6 +104,64 @@ func (s *AttendanceService) Settle(db *gorm.DB, actorID, lessonID uint64, marks 
 			}
 			if err := tx.Create(att).Error; err != nil {
 				return err
+			}
+
+			// The classroom flag: the teacher ticked "a consultant has to
+			// take this over", so a task row is opened for the consultant
+			// in this same transaction. It is a flag and not a second text
+			// field by design - the only person who can write this column
+			// is the teacher standing in the room, and the sentence the
+			// family eventually reads is written afterwards by the
+			// consultant who digested it. Neither is derived from the
+			// other.
+			//
+			// The two checks above decide whether this runs at all, and
+			// both decisions are load-bearing:
+			//
+			//   - The `existingID != 0` continue means only a settle that
+			//     actually created the attendance row gets here. Replaying
+			//     the same roll call stops at that branch, so ticking the
+			//     box twice yields one task, not two. Idempotence comes
+			//     from attendances' own uniqueness rather than from a
+			//     second guard that could disagree with it.
+			//   - It sits before the charging block because the
+			//     IsDuplicateLedger branch inside that block `continue`s
+			//     past everything below it. A duplicate consume entry says
+			//     the money for this lesson+student was already taken; it
+			//     says nothing about whether a person still has to call the
+			//     family. Letting a money key swallow the task would drop a
+			//     flagged student silently, and it would do so exactly in
+			//     the replay case most likely to be flagged.
+			//
+			// note and parent_note* stay empty on purpose: the teacher's
+			// sentence is already in attendances.note, and copying it here
+			// would make two copies of one remark that drift the moment
+			// either side is edited. follow_ups.note means "what the
+			// consultant did about it" - CompleteFollowUp overwrites it -
+			// so the teacher's original wording would be erased the first
+			// time the task was closed.
+			//
+			// The deadline comes from cfg.Thresholds.FollowUpSLAHours, the
+			// same field the trial conversion path reads, so both origins
+			// of a follow-up are measured by one clock; a literal 48 here
+			// would be a second source of truth for the same promise.
+			if m.NeedsFollowUp {
+				fu := &model.FollowUp{
+					StudentID: m.StudentID,
+					// nil: this row did not come from a trial, and
+					// pointing TrialID at a stand-in would make the
+					// column say something untrue. Source, not the
+					// absence of trial_id, is what tells the reader
+					// where it came from.
+					TrialID:   nil,
+					Source:    "teacher_note",
+					DueAt:     now.Add(time.Duration(cfg.Thresholds.FollowUpSLAHours) * time.Hour),
+					Status:    "pending",
+					CreatedAt: now,
+				}
+				if err := tx.Create(fu).Error; err != nil {
+					return err
+				}
 			}
 
 			if m.Status.Charges() {
@@ -121,9 +212,21 @@ func (s *AttendanceService) Override(db *gorm.DB, actorID, lessonID, studentID u
 			return err
 		}
 
+		// LEFT(...,255): note is VARCHAR(255), and the correction suffix is
+		// appended to whatever the teacher already typed. Without the cap, a
+		// long teacher remark would make the correction itself fail on a
+		// strict-mode "data too long" - i.e. the audit trail would block the
+		// correction it is supposed to record.
+		//
+		// The cap cuts from the tail, so a remark within ~20 characters of
+		// the limit can leave the suffix as a fragment like " | corrected
+		// fr". teacherFeedback would then read that fragment as the
+		// teacher's own words. The window is narrow and the cost is one
+		// noisy evidence line, so it is documented instead of paid for with
+		// a reserved-width trick that would silently shorten every remark.
 		res := tx.Exec(`UPDATE attendances SET status=?, source='teacher_override',
-			recorded_by_user_id=?, recorded_at=?, note=CONCAT_WS(' | ', note, ?)
-			WHERE id=?`, st, actorID, now, "corrected from "+string(prev.Status), prev.ID)
+			recorded_by_user_id=?, recorded_at=?, note=LEFT(CONCAT_WS(' | ', note, ?), 255)
+			WHERE id=?`, st, actorID, now, correctionPrefix+string(prev.Status), prev.ID)
 		if res.Error != nil {
 			return res.Error
 		}
@@ -257,7 +360,7 @@ func (s *AttendanceService) RequestLeave(db *gorm.DB, cfg *config.Config, actorU
 			Status:     model.AttLeaveLate,
 			Source:     "system",
 			RecordedAt: &now,
-			Note:       "late leave: notice < 24h",
+			Note:       lateLeaveNote,
 		}
 		if err := tx.Create(att).Error; err != nil {
 			return err
@@ -269,7 +372,7 @@ func (s *AttendanceService) RequestLeave(db *gorm.DB, cfg *config.Config, actorU
 			LessonID:     &lessonID,
 			AttendanceID: &att.ID,
 			ActorUserID:  actorUserID,
-			Note:         "late leave: notice < 24h",
+			Note:         lateLeaveNote,
 		})
 	})
 	if err != nil {
