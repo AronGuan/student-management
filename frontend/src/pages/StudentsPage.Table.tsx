@@ -134,7 +134,7 @@ export function StudentsTable({
                     )}
                   </td>
                   <td className="px-4">
-                    <CreditNumber balance={student.balance} />
+                    <CreditNumber balance={student.balance} status={student.status} />
                   </td>
                   <td className="max-w-[160px] truncate px-4 text-meta text-muted">
                     {student.owner_admin_id === myId ? '我' : student.owner_admin_name || '未分配'}

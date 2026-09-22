@@ -5,7 +5,8 @@ import { creditTier } from '../lib/format';
  * 课时余额 —— 连续量，不能用 badge。三件套：进度条 + 「剩余 / 总量」+ 预计用尽日。
  * UIUX.md §4.1：
  *   ≥20 success 无标记 / 11–19 warn / 6–10 warn + triangle-alert / ≤5 danger + 出现 Renew 按钮
- *   ≤0 透支：danger + 虚线 track + 「已欠 N 节」，动作升级为紧急联系
+ *   <0 透支：danger + 虚线 track + 「已透支 N 节」，动作升级为紧急联系
+ *   =0 是「用完了」而不是「欠账」，所以不走透支样式 —— 见 lib/format.ts 的 creditTier。
  *
  * 关键：低课时的表现是「行尾出现一个按钮」，不是「数字更红」。
  */
@@ -58,7 +59,7 @@ export function CreditCell({
         <TriangleAlert
           size={16}
           className="shrink-0 text-danger"
-          aria-label={balance <= 0 ? '已透支' : '课时不足'}
+          aria-label={balance < 0 ? '已透支' : '课时不足'}
         />
       )}
       <CreditBar balance={balance} total={total} />
@@ -68,7 +69,7 @@ export function CreditCell({
         </span>
         <span className="text-muted"> / {total}</span>
       </span>
-      {balance <= 0 && (
+      {balance < 0 && (
         <span className="text-meta font-510 text-danger">已透支 {Math.abs(balance)}</span>
       )}
     </span>

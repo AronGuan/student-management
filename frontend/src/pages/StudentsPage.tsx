@@ -107,7 +107,14 @@ export default function StudentsPage() {
     if (view !== 'scheduling') return { page: res, clientFiltered: false };
 
     // 服务端已经按 sort 排好序，过滤只做筛选，不重排，免得两边顺序不一致。
-    const unscheduled = res.items.filter((student) => student.active_class_count === 0);
+    //
+    // status === 'active' 是「待排班」的定义的一部分：这个视图的 hint 写的是
+    // 「尚未报名**在读**班级」，而 lead 根本不在读 —— 他缺的不是一个班，是一次成交。
+    // 去掉线索/试听学生的班级之后，他们全员 active_class_count === 0，不加这个谓词
+    // 就会整批涌进这个视图。
+    const unscheduled = res.items.filter(
+      (student) => student.status === 'active' && student.active_class_count === 0,
+    );
     const start = (page - 1) * LIMIT;
     return {
       page: {

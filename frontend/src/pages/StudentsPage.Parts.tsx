@@ -69,7 +69,20 @@ export function LedgerAmount({ delta }: { delta: number }) {
  * + 阈值图标，「剩余 / 总量」留给档案抽屉里那张 CreditMeter —— 宁可不显示，也不拿
  * balance 冒充分母、渲染成一根永远满格的条。
  */
-export function CreditNumber({ balance }: { balance: number }) {
+export function CreditNumber({ balance, status }: { balance: number; status: StudentStatus }) {
+  // 还没成交的学生根本没有课时包，余额读 0 是「还没有账」，不是「用完了」，更不是
+  // 「透支」。在漏斗最前端挂一个红色感叹号，是提醒顾问一件他们此刻不该被提醒的事。
+  if (status === 'lead' || status === 'trial') {
+    return (
+      <span
+        className="num inline-flex items-center gap-2 text-row"
+        title="尚未购课。课时余额从成交开账后开始记。"
+      >
+        <span className="text-muted">—</span>
+        <span className="text-muted">未购课</span>
+      </span>
+    );
+  }
   const tier = creditTier(balance, 0);
   return (
     <span
@@ -80,14 +93,14 @@ export function CreditNumber({ balance }: { balance: number }) {
         <TriangleAlert
           size={16}
           className={balance <= 5 ? 'text-danger' : 'text-warn'}
-          aria-label={balance <= 0 ? '已透支' : '课时不足'}
+          aria-label={balance < 0 ? '已透支' : '课时不足'}
         />
       )}
       <span className="font-590" style={{ color: tier.fill }}>
         {balance}
       </span>
       <span className="text-muted">课时</span>
-      {balance <= 0 && <span className="text-meta font-510 text-danger">已透支 {Math.abs(balance)}</span>}
+      {balance < 0 && <span className="text-meta font-510 text-danger">已透支 {Math.abs(balance)}</span>}
     </span>
   );
 }

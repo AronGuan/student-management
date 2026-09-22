@@ -117,7 +117,9 @@ export interface CreditTier {
 }
 
 export function creditTier(balance: number, _total: number): CreditTier {
-  if (balance <= 0) return { fill: 'var(--danger)', alert: true, action: 'urgent', overdrawn: true };
+  // 透支必须真的是负数。余额正好 0 是「用完了」，不是「欠账」——把 0 归到透支档，
+  // 一条从没开过账的学生记录就会被画成红色虚线轨道 + 「已透支 0」，读起来像会计事故。
+  if (balance < 0) return { fill: 'var(--danger)', alert: true, action: 'urgent', overdrawn: true };
   if (balance <= 5) return { fill: 'var(--danger)', alert: true, action: 'renew', overdrawn: false };
   if (balance <= 10) return { fill: 'var(--warn)', alert: true, action: null, overdrawn: false };
   if (balance <= 19) return { fill: 'var(--warn)', alert: false, action: null, overdrawn: false };
