@@ -123,6 +123,10 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 			FullName string
 			OwnerIdx int
 			UserID   uint64
+			// Status is carried along so that the demo-consultant block
+			// further down can pick its sample students by what they are,
+			// instead of by where they happen to sit in this slice.
+			Status model.StudentStatus
 		}
 		students := []madeStudent{}
 
@@ -144,7 +148,7 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 			VALUES (?,?,?,?,?,1)`, hero.ID, "Zhao Min", "0412 000 337", "zhaomin@example.com", "mother").Error; err != nil {
 			return err
 		}
-		students = append(students, madeStudent{hero.ID, hero.FullName, 0, heroUser[0].ID})
+		students = append(students, madeStudent{hero.ID, hero.FullName, 0, heroUser[0].ID, hero.Status})
 
 		counter := 0
 		for a := 0; a < len(admins); a++ {
@@ -198,7 +202,7 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 				_ = tx.Exec(`INSERT INTO guardians (student_id, name, phone, relationship, is_primary)
 					VALUES (?,?,?,?,1)`, st.ID, ln+" parent",
 					fmt.Sprintf("04%02d %03d %03d", counter%100, counter%1000, (counter*7)%1000), "parent").Error
-				students = append(students, madeStudent{st.ID, st.FullName, a, 0})
+				students = append(students, madeStudent{st.ID, st.FullName, a, 0, status})
 			}
 		}
 
@@ -494,23 +498,37 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 		//     did those blocks happen to use" is exactly the derivation
 		//     that goes stale the next time one of them is edited.
 		//
-		//  2. Students at index 7 and 9 are skipped, and that is what
-		//     keeps the roster believable afterwards. Index 9 is mei.lin's
-		//     only 'lead' and index 7 her only 'trial' - the two samples
-		//     the students page filters by. Any trial on either one
-		//     replays a lifecycle hop (promoteForTrial: lead -> trial, or
-		//     trial -> active when the outcome is converted), so both
+		//  2. Every student still in the 'lead' or 'trial' stage is
+		//     skipped, and that is what keeps the roster believable
+		//     afterwards. mei.lin has exactly one of each - the two
+		//     samples the students page filters by. Any trial on either
+		//     one replays a lifecycle hop (promoteForTrial: lead -> trial,
+		//     or trial -> active when the outcome is converted), so both
 		//     samples would quietly turn 'active' and the 线索 /
-		//     已约试听 filters would come back empty. The exclusion is
-		//     deliberate, not an oversight.
+		//     已约试听 filters would come back empty.
+		//
+		//     The test is the student's status, not their position in this
+		//     slice. It used to be "index 7 and 9", which held only as long
+		//     as nobody was ever inserted into the roster: a position
+		//     identifies the two samples by an accident of ordering, so
+		//     inserting one student in the middle moves both of them and
+		//     nothing complains. The silent part is what makes it worth
+		//     carrying the field: promoteForTrial would still complete its
+		//     hops, and both reportStates invariants (convertedStillProspect,
+		//     bookedStillLead) would still read 0. The only symptom would be
+		//     the two student-page filters coming back empty - no error
+		//     anywhere, just a quietly less believable snapshot.
+		//
+		//     Hero (index 0) is 'active', so it stays eligible exactly as
+		//     before. The exclusion is deliberate, not an oversight.
 		//
 		// The other eleven students are cycled through, each with a
 		// subject cursor that persists across the three outcomes, so one
 		// student's three trials land on three different subjects.
 		const demoPerOutcome = 10
 		demo := []madeStudent{}
-		for i, s := range students {
-			if s.OwnerIdx != 0 || i == 7 || i == 9 {
+		for _, s := range students {
+			if s.OwnerIdx != 0 || s.Status == model.StudentLead || s.Status == model.StudentTrial {
 				continue
 			}
 			demo = append(demo, s)
