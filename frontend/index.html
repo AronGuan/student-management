@@ -3,11 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Austin Education · 课时履约控制台</title>
+    <title>Austin Education · 学生管理系统</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- 设计系统的字重是 400 / 510 / 590 三档（docs/UIUX.md:163），不是 400/500/600。
+         原先请求的是三个离散字重，浏览器拿到的就是**静态实例**，于是 510 会被就近吸附到 500、
+         590 吸附到 600 —— 设计稿里的字重拿不到。改成区间后拿到的是**可变字体**
+         （@font-face 声明 font-weight: 100 900），510 / 590 才是它们本来的值。 -->
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=Noto+Sans+SC:wght@100..900&family=JetBrains+Mono:wght@100..800&display=swap"
       rel="stylesheet"
     />
   </head>

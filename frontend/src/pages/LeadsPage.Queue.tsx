@@ -7,7 +7,7 @@
  */
 import { useState } from 'react';
 import { CircleCheck, Phone } from 'lucide-react';
-import { Button } from '../components/ui';
+import { Button, chipStateClass } from '../components/ui';
 import { ListState } from '../components/StateViews';
 import { dateTime } from '../lib/format';
 import { FollowUpStatus } from './LeadsPage.Shared';
@@ -60,9 +60,9 @@ export default function LeadsQueue({
             type="button"
             onClick={() => onFilter(f.key)}
             aria-pressed={filter === f.key}
-            className={`h-6 rounded-sm px-2 text-meta font-510 transition-colors duration-150 ease-standard ${
-              filter === f.key ? 'bg-accent-bg text-accent' : 'text-muted hover:bg-row-hover hover:text-fg'
-            }`}
+            className={`h-6 rounded-sm px-2 text-meta font-510 transition-colors duration-150 ease-standard ${chipStateClass(
+              filter === f.key,
+            )}`}
           >
             {f.label}
           </button>

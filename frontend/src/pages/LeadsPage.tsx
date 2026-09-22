@@ -12,7 +12,7 @@ import { useParams } from 'react-router';
 import { BellRing, ClipboardList } from 'lucide-react';
 import { api, humaniseError } from '../lib/api';
 import { useToast } from '../components/Toast';
-import { Panel, PanelHeader } from '../components/ui';
+import { chipStateClass, Panel, PanelHeader } from '../components/ui';
 import LeadsTrials from './LeadsPage.Trials';
 import LeadsQueue from './LeadsPage.Queue';
 import LeadsPlaybook from './LeadsPage.Playbook';
@@ -192,11 +192,9 @@ export default function LeadsPage() {
                     type="button"
                     onClick={() => setOutcomeFilter(tab.key)}
                     aria-pressed={outcomeFilter === tab.key}
-                    className={`h-6 rounded-sm px-2 text-meta font-510 transition-colors duration-150 ease-standard ${
-                      outcomeFilter === tab.key
-                        ? 'bg-accent-bg text-accent'
-                        : 'text-muted hover:bg-row-hover hover:text-fg'
-                    }`}
+                    className={`h-6 rounded-sm px-2 text-meta font-510 transition-colors duration-150 ease-standard ${chipStateClass(
+                      outcomeFilter === tab.key,
+                    )}`}
                   >
                     {tab.label}
                   </button>

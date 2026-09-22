@@ -62,7 +62,7 @@ export default function LoginPage() {
             <GraduationCap size={24} strokeWidth={1.75} className="mt-0.5 shrink-0 text-accent" aria-hidden />
             <div className="min-w-0">
               <h1 className="page-title text-fg">Austin Education</h1>
-              <p className="text-meta text-muted">课时履约控制台</p>
+              <p className="text-meta text-muted">学生管理系统</p>
             </div>
           </header>
 

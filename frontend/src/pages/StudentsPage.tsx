@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { RotateCw, Search, X } from 'lucide-react';
-import { Button, Input } from '../components/ui';
+import { Button, chipStateClass, Input } from '../components/ui';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import type { StudentPage } from '../lib/types';
@@ -157,9 +157,9 @@ export default function StudentsPage() {
               type="button"
               aria-pressed={view === item.key}
               onClick={() => update({ view: item.key, page: null })}
-              className={`h-7 rounded-sm px-2.5 text-meta font-510 transition-colors duration-150 ease-standard ${
-                view === item.key ? 'bg-accent-bg text-accent' : 'text-muted hover:bg-row-hover hover:text-fg'
-              }`}
+              className={`h-7 rounded-sm px-2.5 text-meta font-510 transition-colors duration-150 ease-standard ${chipStateClass(
+                view === item.key,
+              )}`}
             >
               {item.label}
             </button>

@@ -53,6 +53,24 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   );
 });
 
+/* ── Segmented chip ──────────────────────────────────────────────────────────
+   分段筛选胶囊的**选中/未选中**两个状态。学生页的四个视图、线索页的队列筛选、
+   试听的结果筛选共用同一份，避免第三次抄写出偏差（此前三处已经是 h-7/px-2.5
+   和 h-6/px-2 两种规格）。
+
+   选中态用**实心 accent 填充**而不是 7% 的 accent-bg：这是个强状态——一屏里只有
+   一个是真——7% 的底色在白底上几乎看不出来，要「眯眼找」。实心填充把它变成
+   一眼可见，代价只是那一小块面积。
+
+   选中的那一个**不响应 hover**：它已经在目的地了，再给出「会变」的暗示是反的；
+   未选中的响应 hover，才是在邀请切换。                                            */
+
+export function chipStateClass(active: boolean): string {
+  return active
+    ? 'bg-accent text-accent-on font-510 shadow-sm'
+    : 'text-muted hover:bg-row-hover hover:text-fg';
+}
+
 /* ── Surfaces ───────────────────────────────────────────────────────────── */
 
 export function Panel({ children, className = '' }: { children: ReactNode; className?: string }) {

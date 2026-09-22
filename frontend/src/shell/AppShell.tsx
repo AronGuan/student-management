@@ -50,7 +50,7 @@ export function AppShell({ role, children }: { role: UserRole; children: ReactNo
           <GraduationCap size={20} aria-hidden style={{ color: 'var(--accent)' }} />
           <div className="min-w-0">
             <p className="section-title text-fg truncate">Austin Education</p>
-            <p className="text-meta text-muted truncate">课时履约控制台</p>
+            <p className="text-meta text-muted truncate">学生管理系统</p>
           </div>
         </div>
 

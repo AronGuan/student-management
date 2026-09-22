@@ -326,7 +326,9 @@ export interface LeaveRequest {
  *
  * `overdue_hours` 来自 dashboard 的 `followUpRow`（dashboard.go:36）：`int64` 非指针、**无** `omitempty`，
  * 且 SQL 已按 `WHERE fu.due_at < now` 预过滤 —— **键恒在、值恒为正**（正 = 已逾期小时数）。
- * 别和 `/follow-ups` 的 `model.FollowUp.overdue_hours` 混：那个是 `*int64 + omitempty`，非 pending 时键整个缺席。
+ * 别和 `/follow-ups` 的 `model.FollowUp.overdue_hours` 混：那个是 `*int64 + omitempty`，
+ * 且**只有「仍是 pending 且已过 due_at」的行才有键**（未到期的 pending 行同样整个键缺席），
+ * 值也恒不为负 —— 两个端点同名同义，都是「键在即已逾期」。
  */
 export interface FollowUpQueueRow {
   id: number;

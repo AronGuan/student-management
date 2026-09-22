@@ -42,6 +42,15 @@
   --font-body: var(--font-body);
   --font-mono: var(--font-mono);
 
+  /* 字重三档，docs/UIUX.md:163「字重只三级：400 / 510 / 590」。
+     组件里一共写了 60 处 font-400 / font-510 / font-590，但主题里原先没有对应 token，
+     而 Tailwind v4 对**解析不到的工具类静默丢弃**（不报错、不告警）—— 构建产物里只有
+     AppShell 用方括号写的 .font-\[510\]，裸写的 .font-510 / .font-400 / .font-590 一个都没生成，
+     于是整层「强调字重」一直继承成 400。这里把三档补上，调用点写法保持不变。 */
+  --font-weight-400: 400;
+  --font-weight-510: 510;
+  --font-weight-590: 590;
+
   --text-th: 11px;
   --text-th--line-height: 16px;
   --text-meta: 12px;
