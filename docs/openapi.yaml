@@ -575,6 +575,11 @@ paths:
                   - type: object
                     properties:
                       data: { $ref: '#/components/schemas/Trial' }
+        '400':
+          description: "subject_id / teacher_id 任一缺失或为 0：code=40000（此前 teacher_id 缺失会被静默接受、落库为 NULL —— 本次修复的真实缺陷）。student_id 缺失或指向不存在的学生时，更早地被 handler 的 R7 归属校验拦下，返回 404 / code=40400。"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiErrorBody' }
         '409':
           description: "R1 违反：code=40905"
           content:
@@ -1685,7 +1690,7 @@ components:
       properties:
         student_id: { type: integer, format: int64 }
         subject_id: { type: integer, format: int64 }
-        teacher_id: { type: integer, format: int64 }
+        teacher_id: { type: integer, format: int64, description: "服务端强制必填（`service/trial.go` 的 CreateTrial 连同 student_id / subject_id 一起校验）。缺少它或传 0 即 400 / code=40000：没有老师的试听无法出勤结算，且 `GET /trials` 按 trials.teacher_id = self 收口，这样的行对所有老师都不可见。" }
         scheduled_at: { type: string, format: date-time }
         duration_min: { type: integer, default: 60 }
 

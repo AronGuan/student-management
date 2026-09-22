@@ -17,8 +17,16 @@ type TrialService struct{}
 // The database carries UNIQUE(student_id, subject_id); the pre-check only
 // exists to return a clean business code instead of a MySQL error.
 func (s *TrialService) CreateTrial(db *gorm.DB, t *model.Trial) error {
-	if t.StudentID == 0 || t.SubjectID == 0 {
-		return apierr.BadRequest("student_id 与 subject_id 为必填")
+	// teacher_id is required, not merely optional-in-practice:
+	// a trial with no teacher cannot produce an attendance record, so it can
+	// never be settled against the family's prepaid credits; and GET /trials
+	// scopes the teacher role by trials.teacher_id = self, so a NULL teacher
+	// makes the row invisible to every teacher who could have taught it - it
+	// silently drops out of the only queue that would chase it.
+	// The column is NULL-able, so the check must reject both a missing field
+	// (nil pointer) and an explicit 0.
+	if t.StudentID == 0 || t.SubjectID == 0 || t.TeacherID == nil || *t.TeacherID == 0 {
+		return apierr.BadRequest("student_id、subject_id 与 teacher_id 为必填")
 	}
 	var dup int
 	if err := db.Raw("SELECT COUNT(*) FROM trials WHERE student_id=? AND subject_id=?",
