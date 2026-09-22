@@ -34,10 +34,21 @@ func Register(r *gin.Engine, d *Deps) {
 	dash := &DashboardHandler{Cfg: d.Cfg}
 
 	// Front end runs on a different origin in dev, so credentials are
-	// allowed explicitly rather than wildcarded. The allowlist is config-driven
-	// (config.CORS_ORIGINS) because it carries the front end's port, which has
-	// already moved once - and a stale entry here fails only in the browser, as
-	// a preflight rejection with no body and nothing in the server log.
+	// allowed explicitly rather than wildcarded.
+	//
+	// Proxied requests still carry the browser's Origin verbatim: changeOrigin
+	// only rewrites Host (frontend/vite.config.ts:23), so the same-origin
+	// shortcut inside gin-contrib/cors (Origin == "http://" + Request.Host, that
+	// module's own config.go:79) never matches behind the proxy. A missing entry
+	// is therefore a hard 403 with an empty body - AbortWithStatus writes no
+	// body, unlike the {code,data,message} envelope every business 403 gets
+	// (handler/respond.go, middleware/auth.go). gin.Logger() is registered ahead
+	// of this middleware (cmd/server/main.go:70), so the 403 IS in the access
+	// log; that log line plus the empty body is what distinguishes it from a
+	// role or credential failure.
+	//
+	// The allowlist is config-driven (config.CORS_ORIGINS) because it carries the
+	// front end's port, which has already moved once.
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     d.Cfg.CORSOrigin,
 		AllowMethods:     []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},

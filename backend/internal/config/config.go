@@ -68,15 +68,25 @@ func Load() (*Config, error) {
 		DBDSN:     getenv("DB_DSN", ""),
 		JWTSecret: getenv("JWT_SECRET", "dev-only-secret-change-me"),
 		JWTTTL:    time.Duration(getenvInt("JWT_TTL_MINUTES", 480)) * time.Minute,
-		// The browser normally reaches the API through the front end's own
-		// origin (Vite's proxy in dev, the preview server when deployed), so
-		// this list is not on the happy path - a same-origin request never
-		// triggers CORS. It exists for callers that go direct.
+		// The browser DOES send its Origin through the front end's proxy: Vite's
+		// changeOrigin (frontend/vite.config.ts:23) rewrites Host to the backend
+		// target but passes Origin through untouched, so the shortcut inside
+		// gin-contrib/cors that skips validation when Origin == "http://" +
+		// Request.Host (that module's own config.go:79 - not this file) can never
+		// match on the proxied path. The allowlist is the only way through, not a
+		// back door for callers that go direct.
+		//
+		// Getting it wrong is a login outage, not an edge case: the request is
+		// rejected with 403 before it reaches any handler, and AbortWithStatus
+		// writes no body, so the browser sees a failed login with an empty
+		// response. The gin access log does record it - cmd/server/main.go:70
+		// registers gin.Logger() ahead of the cors middleware. Every business 403
+		// carries the {code,data,message} envelope (handler/respond.go), so "403
+		// with an empty body" is the fingerprint for this one.
 		//
 		// Configurable rather than hardcoded because the moment this runs
-		// anywhere but a laptop the allowed origin is a host name, and a stale
-		// allowlist fails as a preflight rejection with no body and no server
-		// log line - the browser reports a CORS error and the API looks fine.
+		// anywhere but a laptop the allowed origin is a host name or an IP, and
+		// the list has to travel with the deployment.
 		CORSOrigin: getenvList("CORS_ORIGINS", []string{
 			"http://localhost:19073",
 			"http://127.0.0.1:19073",
