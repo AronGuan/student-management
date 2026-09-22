@@ -206,12 +206,9 @@ export default function LeadsPage() {
 
   async function recordOutcome(trialId: number, outcome: 'converted' | 'lost', note: string) {
     try {
-      // Go 直接返回新建的 FollowUp（openapi 草案写的是 { trial, follow_up }，两种都吃）
-      const res = await api.post<FollowUpListRow | { follow_up: FollowUpListRow }>(
-        `/trials/${trialId}/outcome`,
-        { outcome, note },
-      );
-      const created: FollowUpListRow = 'follow_up' in res ? res.follow_up : res;
+      // 服务端 handler/trial.go 直接 OK(c, fu)，data 就是新建的 FollowUp，
+      // 没有 { trial, follow_up } 包装层（openapi.yaml 已按运行时校正）。
+      const created = await api.post<FollowUpListRow>(`/trials/${trialId}/outcome`, { outcome, note });
       push('success', '结果已记录。跟进任务将在 48 小时后到期。');
       const [loadedCount] = await Promise.all([loadTrials(), refreshQueue()]);
       // 刚记完结果的那一行可能正是本页最后一行，重拉后本页会空掉。服务端不会自动往前挪，
